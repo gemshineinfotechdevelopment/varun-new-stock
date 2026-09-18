@@ -10,6 +10,7 @@ dotenv.config();
 import { connectDB } from './config/db';
 import { seedDatabase } from './seedData';
 import { errorHandler } from './middleware/errorHandler';
+import { StockService } from './services/stockService';
 
 import authRoutes from './routes/authRoutes';
 import productRoutes from './routes/productRoutes';
@@ -28,7 +29,15 @@ const PORT = process.env.PORT || 5013;
 
 // Connect Database & Seed default data
 connectDB().then(() => {
-  seedDatabase();
+  seedDatabase().then(() => {
+    // Initial sync of bills
+    StockService.syncNewBillsFromDb().catch(() => {});
+  });
+
+  // Background auto-sync of new bills every 10 seconds from shared DB
+  setInterval(() => {
+    StockService.syncNewBillsFromDb().catch(() => {});
+  }, 10000);
 });
 
 // Configure CORS Origins

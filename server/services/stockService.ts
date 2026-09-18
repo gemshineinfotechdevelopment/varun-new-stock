@@ -181,6 +181,101 @@ export class StockService {
   }
 
   /**
+   * Automatically detect and process any bills in MongoDB `bills` collection that haven't been processed yet
+   */
+  static async syncNewBillsFromDb(): Promise<{
+    processedBills: number;
+    skippedBills: number;
+    errors: string[];
+  }> {
+    try {
+      if (!mongoose.connection.db) {
+        return { processedBills: 0, skippedBills: 0, errors: ['DB not connected'] };
+      }
+
+      const collections = await mongoose.connection.db.listCollections().toArray();
+      const colNames = collections.map((c) => c.name);
+
+      const targetCol = colNames.find((n) =>
+        ['bills', 'bill', 'invoices', 'invoice', 'sales'].includes(n.toLowerCase())
+      );
+
+      if (!targetCol) {
+        return { processedBills: 0, skippedBills: 0, errors: [] };
+      }
+
+      const billsCol = mongoose.connection.db.collection(targetCol);
+      const allBills = await billsCol.find({}).sort({ createdAt: -1, billDate: -1, date: -1 }).toArray();
+
+      let processedBills = 0;
+      let skippedBills = 0;
+      const errors: string[] = [];
+
+      for (const bill of allBills) {
+        const billId = String(bill._id || bill.id || '').trim();
+        const billNumber = String(bill.billNumber || bill.billNo || bill.invoiceNo || bill.slNo || billId).trim();
+
+        if (!billId || !billNumber) continue;
+
+        // Check if already processed
+        const existing = await IntegrationEvent.findOne({
+          $or: [{ externalBillId: billId }, { billNumber }],
+          eventType: 'BILL_SALE',
+          status: 'PROCESSED',
+        });
+
+        if (existing) {
+          skippedBills++;
+          continue;
+        }
+
+        // Extract items array from bill
+        const rawItems = bill.items || bill.particulars || bill.products || [];
+        if (!Array.isArray(rawItems) || rawItems.length === 0) {
+          continue;
+        }
+
+        const normalizedItems = rawItems.map((it: any) => {
+          return {
+            productId: it.productId || it.particularId || it._id || it.id,
+            sku: it.sku || it.itemCode || it.code,
+            productName: it.productName || it.particular || it.name || it.itemName || it.item,
+            quantity: Number(it.quantity || it.qty || it.count || 0) || 0,
+          };
+        }).filter((it: any) => it.quantity > 0);
+
+        if (normalizedItems.length === 0) continue;
+
+        try {
+          const res = await this.processBillingSale({
+            billId,
+            billNumber,
+            customerId: bill.customerId || bill.customerName || bill.customer,
+            items: normalizedItems,
+            billDate: bill.billDate || bill.date || bill.createdAt,
+          });
+
+          if (res.success) {
+            processedBills++;
+          }
+        } catch (err: any) {
+          console.warn(`[Auto Bill Sync] Error processing bill ${billNumber}:`, err.message);
+          errors.push(`Bill ${billNumber}: ${err.message}`);
+        }
+      }
+
+      if (processedBills > 0) {
+        console.log(`[Auto Bill Sync] ✅ Successfully processed stock reduction for ${processedBills} new bills from '${targetCol}'!`);
+      }
+
+      return { processedBills, skippedBills, errors };
+    } catch (err: any) {
+      console.error('[Auto Bill Sync Error]:', err);
+      return { processedBills: 0, skippedBills: 0, errors: [err.message] };
+    }
+  }
+
+  /**
    * Set or initialize opening stock for a product
    */
   static async setOpeningStock(params: {
@@ -465,7 +560,7 @@ export class StockService {
       };
     }
 
-    // Step 2: Validate all items and check shop stock availability
+    // Step 2: Validate all items and find inventory
     const validatedItems: Array<{
       product: IProduct;
       inventory: IInventory;
@@ -477,7 +572,7 @@ export class StockService {
         continue;
       }
 
-      // Find product by SKU or productId or name
+      // Find product by SKU or productId or name (case-insensitive)
       let product: IProduct | null = null;
       if (item.productId && mongoose.Types.ObjectId.isValid(item.productId)) {
         product = await Product.findById(item.productId);
@@ -486,27 +581,55 @@ export class StockService {
         product = await Product.findOne({ sku: item.sku.trim().toUpperCase() });
       }
       if (!product && item.productName) {
-        product = await Product.findOne({ name: item.productName.trim() });
+        const pName = item.productName.trim();
+        product = await Product.findOne({
+          $or: [
+            { name: pName },
+            { name: new RegExp(`^${pName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+          ],
+        });
       }
 
       if (!product) {
-        throw new Error(
-          `Product not found in Stock System: SKU '${item.sku || 'N/A'}' / Name '${item.productName || 'N/A'}'`
-        );
+        const autoName = String(item.productName || item.sku || '').trim();
+        if (autoName) {
+          const cleanSku = (item.sku || autoName.replace(/[^A-Za-z0-9]/g, '').slice(0, 4) + '-' + Date.now().toString().slice(-4)).toUpperCase();
+          product = await Product.create({
+            name: autoName,
+            sku: cleanSku,
+            category: 'General',
+            unit: 'PCS',
+            isActive: true,
+          });
+          await Inventory.create({
+            productId: product._id,
+            sku: product.sku,
+            productName: product.name,
+            category: 'General',
+            godownStock: 0,
+            shopStock: 0,
+            minGodownStock: 10,
+            minShopStock: 5,
+            lastMovementAt: new Date(),
+          });
+        } else {
+          continue;
+        }
       }
 
-      const inventory = await Inventory.findOne({ productId: product._id });
+      let inventory = await Inventory.findOne({ productId: product._id });
       if (!inventory) {
-        throw new Error(`Inventory record not found for product ${product.name} (${product.sku})`);
-      }
-
-      if (inventory.shopStock < item.quantity) {
-        return {
-          success: false,
-          status: 'INSUFFICIENT_STOCK',
-          message: `Insufficient shop stock for '${product.name}' (${product.sku}). Available in Shop: ${inventory.shopStock} PCS, Requested: ${item.quantity} PCS.`,
-          billNumber,
-        };
+        inventory = await Inventory.create({
+          productId: product._id,
+          sku: product.sku,
+          productName: product.name,
+          category: product.category,
+          godownStock: 0,
+          shopStock: 0,
+          minGodownStock: product.minGodownStock || 10,
+          minShopStock: product.minShopStock || 5,
+          lastMovementAt: new Date(),
+        });
       }
 
       validatedItems.push({
@@ -520,27 +643,39 @@ export class StockService {
       throw new Error('No valid items with quantity > 0 found in bill');
     }
 
-    // Step 3: Perform atomic deduction from Shop Stock and log transactions
+    // Step 3: Perform atomic deduction (from Shop, or Godown if shop stock is low)
     const processedItemsSummary: any[] = [];
 
     for (const { product, inventory, quantity } of validatedItems) {
       const beforeShop = inventory.shopStock;
       const beforeGodown = inventory.godownStock;
 
-      const updated = await Inventory.findOneAndUpdate(
-        { _id: inventory._id, shopStock: { $gte: quantity } },
+      let shopDeduct = quantity;
+      let godownDeduct = 0;
+
+      if (beforeShop >= quantity) {
+        shopDeduct = quantity;
+        godownDeduct = 0;
+      } else if (beforeShop > 0) {
+        shopDeduct = beforeShop;
+        godownDeduct = quantity - beforeShop;
+      } else {
+        shopDeduct = 0;
+        godownDeduct = quantity;
+      }
+
+      const updated = await Inventory.findByIdAndUpdate(
+        inventory._id,
         {
-          $inc: { shopStock: -quantity },
+          $inc: { shopStock: -shopDeduct, godownStock: -godownDeduct },
           $set: { lastMovementAt: new Date() },
         },
         { new: true }
       );
 
-      if (!updated) {
-        throw new Error(
-          `Concurrency conflict: Shop stock changed during deduction for ${product.name} (${product.sku})`
-        );
-      }
+      // Update product cached stock
+      const totalStockAfter = (updated?.godownStock || 0) + (updated?.shopStock || 0);
+      await Product.findByIdAndUpdate(product._id, { $set: { stock: totalStockAfter } });
 
       processedItemsSummary.push({
         productId: product._id.toString(),
@@ -548,7 +683,9 @@ export class StockService {
         productName: product.name,
         quantity,
         shopStockBefore: beforeShop,
-        shopStockAfter: updated.shopStock,
+        shopStockAfter: updated?.shopStock || 0,
+        godownStockBefore: beforeGodown,
+        godownStockAfter: updated?.godownStock || 0,
       });
 
       // Record transaction
@@ -558,17 +695,17 @@ export class StockService {
         sku: product.sku,
         productName: product.name,
         type: 'BILL_SALE',
-        location: 'SHOP',
+        location: shopDeduct > 0 && godownDeduct > 0 ? 'BOTH' : (shopDeduct > 0 ? 'SHOP' : 'GODOWN'),
         quantity: -quantity,
         unit: product.unit || 'PCS',
         beforeGodownStock: beforeGodown,
-        afterGodownStock: beforeGodown,
+        afterGodownStock: updated?.godownStock || 0,
         beforeShopStock: beforeShop,
-        afterShopStock: updated.shopStock,
+        afterShopStock: updated?.shopStock || 0,
         referenceId: billNumber,
         referenceType: 'BILL',
         externalBillId: billId,
-        notes: `Deducted ${quantity} PCS for finalized Bill ${billNumber}`,
+        notes: `Deducted ${quantity} PCS for finalized Bill ${billNumber} (${shopDeduct} from Shop, ${godownDeduct} from Godown)`,
         performedBy: 'Billing Integration',
       });
     }

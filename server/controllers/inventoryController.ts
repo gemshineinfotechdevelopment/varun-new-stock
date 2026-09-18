@@ -9,6 +9,10 @@ import { AuthRequest } from '../middleware/authMiddleware';
 
 export const getDashboardStats = async (req: Request, res: Response): Promise<void> => {
   try {
+    try {
+      await StockService.syncNewBillsFromDb();
+    } catch {}
+
     const totalProducts = await Product.countDocuments({ isActive: true });
 
     // Aggregate inventory quantities
@@ -103,6 +107,10 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
 
 export const getInventoryList = async (req: Request, res: Response): Promise<void> => {
   try {
+    try {
+      await StockService.syncNewBillsFromDb();
+    } catch {}
+
     const { category, search, filterLowStock, sortBy = 'totalStock', sortOrder = 'desc' } = req.query;
 
     const query: any = {};
