@@ -237,6 +237,73 @@ export const deleteProduct = async (req: AuthRequest, res: Response): Promise<vo
   }
 };
 
+export const bulkDeleteProducts = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { ids, deleteAll } = req.body;
+
+    if (deleteAll) {
+      const count = await Product.countDocuments();
+      await Product.deleteMany({});
+      await Inventory.deleteMany({});
+
+      await AuditLog.create({
+        user: req.user ? req.user.name : 'Admin',
+        action: `Bulk deleted all products and inventories (${count} items removed)`,
+        module: 'PRODUCT',
+        referenceId: `BULK-DEL-ALL-${Date.now()}`,
+        ipAddress: req.ip || '',
+      });
+
+      res.json({
+        success: true,
+        message: `Successfully deleted all ${count} products and inventory records from database.`,
+        deletedCount: count,
+      });
+      return;
+    }
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+      res.status(400).json({ success: false, message: 'Please provide an array of product IDs to delete' });
+      return;
+    }
+
+    const objectIds = ids
+      .filter((id: string) => mongoose.Types.ObjectId.isValid(id))
+      .map((id: string) => new mongoose.Types.ObjectId(id));
+
+    const productsToDelete = await Product.find({
+      $or: [{ _id: { $in: objectIds } }, { sku: { $in: ids } }],
+    }).lean();
+
+    const productIds = productsToDelete.map((p) => p._id);
+    const skus = productsToDelete.map((p) => p.sku);
+
+    const deleteResult = await Product.deleteMany({
+      $or: [{ _id: { $in: productIds } }, { sku: { $in: skus } }],
+    });
+
+    await Inventory.deleteMany({
+      $or: [{ productId: { $in: productIds } }, { sku: { $in: skus } }],
+    });
+
+    await AuditLog.create({
+      user: req.user ? req.user.name : 'Admin',
+      action: `Bulk deleted ${deleteResult.deletedCount} products and inventory records`,
+      module: 'PRODUCT',
+      referenceId: `BULK-DEL-${Date.now()}`,
+      ipAddress: req.ip || '',
+    });
+
+    res.json({
+      success: true,
+      message: `Successfully deleted ${deleteResult.deletedCount} selected products.`,
+      deletedCount: deleteResult.deletedCount,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 export const bulkUploadProducts = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { products } = req.body;

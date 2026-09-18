@@ -28,6 +28,7 @@ import {
   InputAdornment,
   Tooltip,
   CircularProgress,
+  Checkbox,
 } from '@mui/material';
 import {
   Plus,
@@ -52,6 +53,52 @@ export const ProductsPage: React.FC = () => {
   const [selectedCategory, setSelectedCategory] = useState('ALL');
   const [syncingBilling, setSyncingBilling] = useState(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
+
+  // Bulk Selection & Delete State
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [bulkDeleteDialogOpen, setBulkDeleteDialogOpen] = useState(false);
+  const [isDeleteAllMode, setIsDeleteAllMode] = useState(false);
+  const [deletingBulk, setDeletingBulk] = useState(false);
+
+  const handleToggleSelectAll = () => {
+    if (selectedIds.length === products.length) {
+      setSelectedIds([]);
+    } else {
+      setSelectedIds(products.map((p) => p._id));
+    }
+  };
+
+  const handleToggleSelect = (id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleOpenBulkDelete = (all = false) => {
+    setIsDeleteAllMode(all);
+    setBulkDeleteDialogOpen(true);
+  };
+
+  const handleConfirmBulkDelete = async () => {
+    setDeletingBulk(true);
+    try {
+      if (isDeleteAllMode) {
+        const res = await ProductsApi.bulkDelete({ deleteAll: true });
+        setSyncToast(res.message || 'All products deleted successfully.');
+      } else {
+        const res = await ProductsApi.bulkDelete({ ids: selectedIds });
+        setSyncToast(res.message || `Deleted ${selectedIds.length} products successfully.`);
+      }
+      setSelectedIds([]);
+      setBulkDeleteDialogOpen(false);
+      fetchData();
+      setTimeout(() => setSyncToast(null), 5000);
+    } catch (err: any) {
+      alert('Failed to delete products: ' + (err.message || 'Error'));
+    } finally {
+      setDeletingBulk(false);
+    }
+  };
 
   const handleSyncBilling = async () => {
     setSyncingBilling(true);
@@ -441,6 +488,19 @@ export const ProductsPage: React.FC = () => {
           >
             Add Single Product
           </Button>
+
+          {products.length > 0 && (
+            <Button
+              variant="outlined"
+              color="error"
+              size="small"
+              onClick={() => handleOpenBulkDelete(true)}
+              startIcon={<Trash2 size={16} />}
+              sx={{ borderColor: '#fca5a5', color: '#dc2626', fontWeight: 600, fontSize: '0.8rem' }}
+            >
+              Delete All
+            </Button>
+          )}
         </Box>
       </Box>
 
@@ -448,6 +508,52 @@ export const ProductsPage: React.FC = () => {
         <Alert severity="success" sx={{ mb: 2.5 }} onClose={() => setSyncToast(null)}>
           {syncToast}
         </Alert>
+      )}
+
+      {/* Floating Bulk Selection Action Banner */}
+      {selectedIds.length > 0 && (
+        <Paper
+          elevation={2}
+          sx={{
+            p: 1.5,
+            mb: 2.5,
+            backgroundColor: '#fef2f2',
+            border: '1px solid #fecaca',
+            borderRadius: 2,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 1.5,
+          }}
+        >
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, color: '#991b1b' }}>
+              ✓ {selectedIds.length} of {products.length} Products Selected
+            </Typography>
+          </Box>
+
+          <Box sx={{ display: 'flex', gap: 1 }}>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={() => setSelectedIds([])}
+              sx={{ borderColor: '#cbd5e1', color: '#475569', fontSize: '0.75rem', fontWeight: 600 }}
+            >
+              Clear Selection
+            </Button>
+            <Button
+              size="small"
+              variant="contained"
+              color="error"
+              onClick={() => handleOpenBulkDelete(false)}
+              startIcon={<Trash2 size={15} />}
+              sx={{ fontWeight: 700, fontSize: '0.75rem', backgroundColor: '#dc2626' }}
+            >
+              Delete Selected ({selectedIds.length})
+            </Button>
+          </Box>
+        </Paper>
       )}
 
       {/* Filter Bar */}
@@ -508,6 +614,15 @@ export const ProductsPage: React.FC = () => {
           <Table sx={{ minWidth: 850 }}>
             <TableHead>
               <TableRow>
+                <TableCell padding="checkbox">
+                  <Checkbox
+                    size="small"
+                    checked={products.length > 0 && selectedIds.length === products.length}
+                    indeterminate={selectedIds.length > 0 && selectedIds.length < products.length}
+                    onChange={handleToggleSelectAll}
+                    disabled={products.length === 0}
+                  />
+                </TableCell>
                 <TableCell>Product Details</TableCell>
                 <TableCell>SKU</TableCell>
                 <TableCell>Category</TableCell>
@@ -523,19 +638,31 @@ export const ProductsPage: React.FC = () => {
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={10} align="center" sx={{ py: 6 }}>
+                  <TableCell colSpan={11} align="center" sx={{ py: 6 }}>
                     Loading products from MongoDB...
                   </TableCell>
                 </TableRow>
               ) : products.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={10} align="center" sx={{ py: 6, color: '#94a3b8' }}>
-                    No products found in MongoDB. Click "Bulk Upload Excel" to import your stock items.
+                  <TableCell colSpan={11} align="center" sx={{ py: 6, color: '#94a3b8' }}>
+                    No products found in MongoDB. Click "Bulk Upload Excel" or "Sync from Billing" to import items.
                   </TableCell>
                 </TableRow>
               ) : (
                 products.map((prod) => (
-                  <TableRow key={prod._id} hover>
+                  <TableRow
+                    key={prod._id}
+                    hover
+                    selected={selectedIds.includes(prod._id)}
+                    sx={{ backgroundColor: selectedIds.includes(prod._id) ? '#eff6ff !important' : 'inherit' }}
+                  >
+                    <TableCell padding="checkbox">
+                      <Checkbox
+                        size="small"
+                        checked={selectedIds.includes(prod._id)}
+                        onChange={() => handleToggleSelect(prod._id)}
+                      />
+                    </TableCell>
                     <TableCell>
                       <Typography variant="body2" sx={{ fontWeight: 700, color: '#1e293b' }}>
                         {prod.name}
@@ -588,9 +715,8 @@ export const ProductsPage: React.FC = () => {
                         <Tooltip title="Delete Product">
                           <IconButton
                             size="small"
-                            color="error"
                             onClick={() => handleDeleteProduct(prod._id, prod.name)}
-                            sx={{ backgroundColor: '#fee2e2' }}
+                            sx={{ color: '#dc2626', backgroundColor: '#fef2f2' }}
                           >
                             <Trash2 size={15} />
                           </IconButton>
@@ -901,6 +1027,56 @@ export const ProductsPage: React.FC = () => {
             sx={{ backgroundColor: '#0f172a', fontWeight: 700 }}
           >
             {formSubmitting ? 'Saving...' : isEditing ? 'Update Product' : 'Create Product'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Bulk Delete Confirmation Dialog */}
+      <Dialog
+        open={bulkDeleteDialogOpen}
+        onClose={() => !deletingBulk && setBulkDeleteDialogOpen(false)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle sx={{ fontWeight: 800, color: '#991b1b', display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Trash2 size={20} color="#dc2626" />
+          {isDeleteAllMode ? 'Delete ALL Products?' : 'Delete Selected Products?'}
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ color: '#475569', mb: 2 }}>
+            {isDeleteAllMode ? (
+              <>
+                Are you sure you want to delete <strong>ALL {products.length} products</strong> from the database?
+                This will also permanently remove all corresponding Godown and Shop inventory records.
+              </>
+            ) : (
+              <>
+                Are you sure you want to delete <strong>{selectedIds.length} selected products</strong>?
+                This action cannot be undone and will delete their inventory records as well.
+              </>
+            )}
+          </Typography>
+          <Alert severity="warning" sx={{ fontSize: '0.8rem' }}>
+            Warning: This is a permanent action and cannot be undone!
+          </Alert>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2.5 }}>
+          <Button
+            onClick={() => setBulkDeleteDialogOpen(false)}
+            disabled={deletingBulk}
+            sx={{ color: '#64748b', fontWeight: 600 }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            color="error"
+            onClick={handleConfirmBulkDelete}
+            disabled={deletingBulk}
+            startIcon={deletingBulk ? <CircularProgress size={16} color="inherit" /> : <Trash2 size={16} />}
+            sx={{ backgroundColor: '#dc2626', fontWeight: 700 }}
+          >
+            {deletingBulk ? 'Deleting...' : isDeleteAllMode ? 'Yes, Delete All' : `Delete (${selectedIds.length})`}
           </Button>
         </DialogActions>
       </Dialog>

@@ -125,6 +125,11 @@ export const ProductsApi = {
       '/products/bulk',
       { method: 'POST', body: JSON.stringify({ products }) }
     ),
+  bulkDelete: (data: { ids?: string[]; deleteAll?: boolean }) =>
+    request<{ success: boolean; message: string; deletedCount: number }>(
+      '/products/bulk-delete',
+      { method: 'POST', body: JSON.stringify(data) }
+    ),
   update: (id: string, data: any) => request<any>(`/products/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   delete: (id: string) => request<any>(`/products/${id}`, { method: 'DELETE' }),
 };
