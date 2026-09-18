@@ -116,8 +116,8 @@ export class StockService {
               sku: product.sku,
               productName: product.name,
               category: product.category,
-              godownStock: rawStock,
-              shopStock: 0,
+              godownStock: 0,
+              shopStock: rawStock,
               minGodownStock: product.minGodownStock || 10,
               minShopStock: product.minShopStock || 5,
               lastMovementAt: new Date(),
@@ -125,6 +125,13 @@ export class StockService {
           } else {
             inv.productName = product.name;
             inv.category = product.category;
+            // If shopStock was 0 and godownStock has stock, migrate to shopStock so sales deduct visibly
+            if (inv.shopStock === 0 && inv.godownStock > 0) {
+              inv.shopStock = inv.godownStock;
+              inv.godownStock = 0;
+            } else if (inv.shopStock === 0 && inv.godownStock === 0 && rawStock > 0) {
+              inv.shopStock = rawStock;
+            }
             await inv.save();
           }
           updatedCount++;
@@ -157,8 +164,8 @@ export class StockService {
             sku: product.sku,
             productName: product.name,
             category: product.category,
-            godownStock: rawStock,
-            shopStock: 0,
+            godownStock: 0,
+            shopStock: rawStock,
             minGodownStock: 10,
             minShopStock: 5,
             lastMovementAt: new Date(),
@@ -196,76 +203,85 @@ export class StockService {
       const collections = await mongoose.connection.db.listCollections().toArray();
       const colNames = collections.map((c) => c.name);
 
-      const targetCol = colNames.find((n) =>
-        ['bills', 'bill', 'invoices', 'invoice', 'sales'].includes(n.toLowerCase())
+      const targetCols = colNames.filter((n) =>
+        ['bills', 'bill', 'invoices', 'invoice', 'sales', 'sale', 'orders', 'order', 'customertransactions', 'transactions', 'estimates', 'estimate', 'billings', 'billing'].includes(n.toLowerCase())
       );
 
-      if (!targetCol) {
+      if (targetCols.length === 0) {
         return { processedBills: 0, skippedBills: 0, errors: [] };
       }
-
-      const billsCol = mongoose.connection.db.collection(targetCol);
-      const allBills = await billsCol.find({}).sort({ createdAt: -1, billDate: -1, date: -1 }).toArray();
 
       let processedBills = 0;
       let skippedBills = 0;
       const errors: string[] = [];
 
-      for (const bill of allBills) {
-        const billId = String(bill._id || bill.id || '').trim();
-        const billNumber = String(bill.billNumber || bill.billNo || bill.invoiceNo || bill.slNo || billId).trim();
+      for (const colName of targetCols) {
+        const billsCol = mongoose.connection.db.collection(colName);
+        const allBills = await billsCol.find({}).sort({ createdAt: -1, billDate: -1, date: -1, _id: -1 }).toArray();
 
-        if (!billId || !billNumber) continue;
+        for (const bill of allBills) {
+          const billId = String(bill._id || bill.id || '').trim();
+          const billNumber = String(bill.billNumber || bill.billNo || bill.invoiceNo || bill.invNo || bill.bill_no || (bill.slNo ? `BILL-${bill.slNo}` : billId)).trim();
 
-        // Check if already processed
-        const existing = await IntegrationEvent.findOne({
-          $or: [{ externalBillId: billId }, { billNumber }],
-          eventType: 'BILL_SALE',
-          status: 'PROCESSED',
-        });
+          if (!billId || !billNumber) continue;
 
-        if (existing) {
-          skippedBills++;
-          continue;
-        }
-
-        // Extract items array from bill
-        const rawItems = bill.items || bill.particulars || bill.products || [];
-        if (!Array.isArray(rawItems) || rawItems.length === 0) {
-          continue;
-        }
-
-        const normalizedItems = rawItems.map((it: any) => {
-          return {
-            productId: it.productId || it.particularId || it._id || it.id,
-            sku: it.sku || it.itemCode || it.code,
-            productName: it.productName || it.particular || it.name || it.itemName || it.item,
-            quantity: Number(it.quantity || it.qty || it.count || 0) || 0,
-          };
-        }).filter((it: any) => it.quantity > 0);
-
-        if (normalizedItems.length === 0) continue;
-
-        try {
-          const res = await this.processBillingSale({
-            billId,
-            billNumber,
-            customerId: bill.customerId || bill.customerName || bill.customer,
-            items: normalizedItems,
-            billDate: bill.billDate || bill.date || bill.createdAt,
+          // Check if already processed
+          const existing = await IntegrationEvent.findOne({
+            $or: [{ externalBillId: billId }, { billNumber }],
+            eventType: 'BILL_SALE',
+            status: 'PROCESSED',
           });
 
-          if (res.success) {
-            processedBills++;
+          if (existing) {
+            skippedBills++;
+            continue;
           }
-        } catch (err: any) {
-          console.warn(`[Auto Bill Sync] Error processing bill ${billNumber}:`, err.message);
-          errors.push(`Bill ${billNumber}: ${err.message}`);
+
+          // Extract items array from bill
+          const rawItems = bill.items || bill.particulars || bill.products || bill.lines || bill.rows || bill.cart || [];
+          if (!Array.isArray(rawItems) || rawItems.length === 0) {
+            continue;
+          }
+
+          const normalizedItems = rawItems
+            .map((it: any) => {
+              const pName = String(it.productName || it.particularName || it.particular?.name || (typeof it.particular === 'string' ? it.particular : '') || it.name || it.itemName || it.item || '').trim();
+              const pQty = Number(it.quantity ?? it.qty ?? it.count ?? it.pcs ?? it.box ?? it.units ?? it.noOfUnits ?? 0) || 0;
+              const pId = it.productId || it.particularId || it.particular?._id || it._id || it.id;
+              const pSku = it.sku || it.itemCode || it.code || it.particularCode;
+
+              return {
+                productId: pId ? String(pId) : undefined,
+                sku: pSku ? String(pSku) : undefined,
+                productName: pName,
+                quantity: pQty,
+              };
+            })
+            .filter((it: any) => it.quantity > 0 && (it.productName || it.sku || it.productId));
+
+          if (normalizedItems.length === 0) continue;
+
+          try {
+            const res = await this.processBillingSale({
+              billId,
+              billNumber,
+              customerId: bill.customerName || bill.customerId?.name || bill.customerId || bill.customer || 'Counter Sale',
+              items: normalizedItems,
+              billDate: bill.billDate || bill.date || bill.createdAt || new Date(),
+            });
+
+            if (res.success) {
+              processedBills++;
+            }
+          } catch (err: any) {
+            console.warn(`[Auto Bill Sync] Error processing bill ${billNumber} from '${colName}':`, err.message);
+            errors.push(`Bill ${billNumber} (${colName}): ${err.message}`);
+          }
         }
       }
 
       if (processedBills > 0) {
-        console.log(`[Auto Bill Sync] ✅ Successfully processed stock reduction for ${processedBills} new bills from '${targetCol}'!`);
+        console.log(`[Auto Bill Sync] ✅ Successfully processed stock reduction for ${processedBills} new bills!`);
       }
 
       return { processedBills, skippedBills, errors };
@@ -647,34 +663,36 @@ export class StockService {
     const processedItemsSummary: any[] = [];
 
     for (const { product, inventory, quantity } of validatedItems) {
-      const beforeShop = inventory.shopStock;
-      const beforeGodown = inventory.godownStock;
+      const beforeShop = Number(inventory.shopStock) || 0;
+      const beforeGodown = Number(inventory.godownStock) || 0;
 
-      let shopDeduct = quantity;
-      let godownDeduct = 0;
+      // Always deduct directly from shopStock
+      // If shopStock was 0 and godownStock has stock, migrate godownStock to shopStock so shopStock balance is live
+      let currentShop = beforeShop;
+      let currentGodown = beforeGodown;
 
-      if (beforeShop >= quantity) {
-        shopDeduct = quantity;
-        godownDeduct = 0;
-      } else if (beforeShop > 0) {
-        shopDeduct = beforeShop;
-        godownDeduct = quantity - beforeShop;
-      } else {
-        shopDeduct = 0;
-        godownDeduct = quantity;
+      if (currentShop === 0 && currentGodown > 0) {
+        currentShop = currentGodown;
+        currentGodown = 0;
       }
+
+      const newShopStock = currentShop - quantity;
+      const newGodownStock = currentGodown;
 
       const updated = await Inventory.findByIdAndUpdate(
         inventory._id,
         {
-          $inc: { shopStock: -shopDeduct, godownStock: -godownDeduct },
-          $set: { lastMovementAt: new Date() },
+          $set: {
+            shopStock: newShopStock,
+            godownStock: newGodownStock,
+            lastMovementAt: new Date(),
+          },
         },
         { new: true }
       );
 
       // Update product cached stock
-      const totalStockAfter = (updated?.godownStock || 0) + (updated?.shopStock || 0);
+      const totalStockAfter = newShopStock + newGodownStock;
       await Product.findByIdAndUpdate(product._id, { $set: { stock: totalStockAfter } });
 
       processedItemsSummary.push({
@@ -683,9 +701,9 @@ export class StockService {
         productName: product.name,
         quantity,
         shopStockBefore: beforeShop,
-        shopStockAfter: updated?.shopStock || 0,
+        shopStockAfter: newShopStock,
         godownStockBefore: beforeGodown,
-        godownStockAfter: updated?.godownStock || 0,
+        godownStockAfter: newGodownStock,
       });
 
       // Record transaction
@@ -695,17 +713,17 @@ export class StockService {
         sku: product.sku,
         productName: product.name,
         type: 'BILL_SALE',
-        location: shopDeduct > 0 && godownDeduct > 0 ? 'BOTH' : (shopDeduct > 0 ? 'SHOP' : 'GODOWN'),
+        location: 'SHOP',
         quantity: -quantity,
         unit: product.unit || 'PCS',
         beforeGodownStock: beforeGodown,
-        afterGodownStock: updated?.godownStock || 0,
+        afterGodownStock: newGodownStock,
         beforeShopStock: beforeShop,
-        afterShopStock: updated?.shopStock || 0,
+        afterShopStock: newShopStock,
         referenceId: billNumber,
         referenceType: 'BILL',
         externalBillId: billId,
-        notes: `Deducted ${quantity} PCS for finalized Bill ${billNumber} (${shopDeduct} from Shop, ${godownDeduct} from Godown)`,
+        notes: `Deducted ${quantity} PCS for finalized Bill ${billNumber} from Shop Stock`,
         performedBy: 'Billing Integration',
       });
     }
