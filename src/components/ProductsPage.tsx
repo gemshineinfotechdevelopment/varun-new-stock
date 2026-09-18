@@ -50,6 +50,23 @@ export const ProductsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('ALL');
+  const [syncingBilling, setSyncingBilling] = useState(false);
+  const [syncToast, setSyncToast] = useState<string | null>(null);
+
+  const handleSyncBilling = async () => {
+    setSyncingBilling(true);
+    setSyncToast(null);
+    try {
+      const res = await ProductsApi.syncFromBilling();
+      setSyncToast(res.message || `Synced items from Billing database!`);
+      fetchData();
+      setTimeout(() => setSyncToast(null), 5000);
+    } catch (err: any) {
+      alert('Failed to sync from billing: ' + (err.message || 'Error'));
+    } finally {
+      setSyncingBilling(false);
+    }
+  };
 
   // Single Product Add/Edit Dialog State
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -379,6 +396,17 @@ export const ProductsPage: React.FC = () => {
 
         <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap' }}>
           <Button
+            variant="contained"
+            size="small"
+            onClick={handleSyncBilling}
+            disabled={syncingBilling}
+            startIcon={syncingBilling ? <CircularProgress size={16} color="inherit" /> : <RefreshCw size={16} />}
+            sx={{ backgroundColor: '#2563eb', '&:hover': { backgroundColor: '#1d4ed8' }, fontWeight: 700, fontSize: '0.8rem' }}
+          >
+            {syncingBilling ? 'Syncing...' : 'Sync from Billing'}
+          </Button>
+
+          <Button
             variant="outlined"
             size="small"
             onClick={handleDownloadTemplate}
@@ -415,6 +443,12 @@ export const ProductsPage: React.FC = () => {
           </Button>
         </Box>
       </Box>
+
+      {syncToast && (
+        <Alert severity="success" sx={{ mb: 2.5 }} onClose={() => setSyncToast(null)}>
+          {syncToast}
+        </Alert>
+      )}
 
       {/* Filter Bar */}
       <Card sx={{ mb: 3 }}>

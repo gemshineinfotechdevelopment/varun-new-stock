@@ -114,6 +114,11 @@ export const ProductsApi = {
     return request<{ success: boolean; count: number; data: any[] }>(`/products${qs ? `?${qs}` : ''}`);
   },
   getById: (id: string) => request<{ success: boolean; data: any }>(`/products/${id}`),
+  syncFromBilling: () =>
+    request<{ success: boolean; message: string; syncedCount: number; updatedCount: number; totalParticulars: number }>(
+      '/products/sync-billing',
+      { method: 'POST' }
+    ),
   create: (data: any) => request<any>('/products', { method: 'POST', body: JSON.stringify(data) }),
   bulkUpload: (products: any[]) =>
     request<{ success: boolean; message: string; insertedCount: number; updatedCount: number; errors?: string[] }>(

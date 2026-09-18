@@ -26,6 +26,13 @@ export const getProducts = async (req: Request, res: Response): Promise<void> =>
       filter.$or = [{ name: searchRegex }, { sku: searchRegex }, { brand: searchRegex }];
     }
 
+    const totalInDb = await Product.countDocuments();
+    if (totalInDb === 0) {
+      try {
+        await StockService.syncFromBillingParticulars();
+      } catch {}
+    }
+
     const products = await Product.find(filter).sort({ createdAt: -1 }).lean();
 
     // Fetch corresponding inventories
@@ -366,6 +373,27 @@ export const bulkUploadProducts = async (req: AuthRequest, res: Response): Promi
       insertedCount,
       updatedCount,
       errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const syncFromBilling = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const result = await StockService.syncFromBillingParticulars();
+
+    await AuditLog.create({
+      user: req.user ? req.user.name : 'Admin',
+      action: `Sync from Billing: ${result.syncedCount} new, ${result.updatedCount} updated`,
+      module: 'PRODUCT',
+      referenceId: `SYNC-${Date.now()}`,
+      ipAddress: req.ip || '',
+    });
+
+    res.json({
+      success: true,
+      ...result,
     });
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });

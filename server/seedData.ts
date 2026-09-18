@@ -65,7 +65,14 @@ export const seedDatabase = async (): Promise<void> => {
       console.log(`[Seed] ✅ Seeded ${sampleCategories.length} default categories.`);
     }
 
-    // 4. Seed Sample Products with Opening Stock if none exist
+    // 4. Sync from Billing Particulars if available
+    try {
+      await StockService.syncFromBillingParticulars();
+    } catch (syncErr) {
+      console.warn('[Seed] Billing sync note:', syncErr);
+    }
+
+    // 5. Seed Sample Products with Opening Stock ONLY if database is still completely empty
     const productCount = await Product.countDocuments();
     if (productCount === 0) {
       const sampleProducts = [

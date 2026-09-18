@@ -16,6 +16,171 @@ export const generateId = (prefix: string): string => {
 
 export class StockService {
   /**
+   * Auto-sync / Import particulars from Billing database collection (`particulars` or `items`)
+   */
+  static async syncFromBillingParticulars(): Promise<{
+    syncedCount: number;
+    updatedCount: number;
+    totalParticulars: number;
+    message: string;
+  }> {
+    try {
+      if (!mongoose.connection.db) {
+        return { syncedCount: 0, updatedCount: 0, totalParticulars: 0, message: 'DB not connected' };
+      }
+
+      const collections = await mongoose.connection.db.listCollections().toArray();
+      const collectionNames = collections.map((c) => c.name);
+
+      const targetColName = collectionNames.find((n) =>
+        ['particulars', 'particular', 'items', 'products_billing'].includes(n.toLowerCase())
+      );
+
+      if (!targetColName) {
+        console.log('[Stock Sync] No particulars collection found in database.');
+        return { syncedCount: 0, updatedCount: 0, totalParticulars: 0, message: 'No particulars collection found in database' };
+      }
+
+      const particularsCol = mongoose.connection.db.collection(targetColName);
+      const particulars = await particularsCol.find({}).toArray();
+
+      if (!particulars || particulars.length === 0) {
+        console.log(`[Stock Sync] Collection '${targetColName}' is empty.`);
+        return { syncedCount: 0, updatedCount: 0, totalParticulars: 0, message: 'No particulars to sync' };
+      }
+
+      const { Category } = require('../models/Category');
+      let syncedCount = 0;
+      let updatedCount = 0;
+
+      for (let i = 0; i < particulars.length; i++) {
+        const item = particulars[i];
+        const name = String(item.name || item.particular || item.itemName || item.particularName || '').trim();
+        if (!name) continue;
+
+        const slNo = Number(item.slNo || item.sno || item.sNo || i + 1) || (i + 1);
+        const categoryName = String(item.category || 'General').trim() || 'General';
+        const brand = String(item.brand || '').trim();
+        const unit = String(item.unit || 'PCS').trim() || 'PCS';
+        const mrp = Number(item.mrp || 0) || 0;
+        const discount = Number(item.discount || 0) || 0;
+        let rate = Number(item.rate || 0) || 0;
+        if (!rate && mrp > 0) {
+          rate = Math.round((mrp - (mrp * discount) / 100) * 100) / 100;
+        }
+        const rawStock = Number(item.stock || item.openingStock || item.qty || item.quantity || 0) || 0;
+
+        let sku = String(item.sku || item.itemCode || item.code || '').trim().toUpperCase();
+        if (!sku) {
+          const cleanName = name.replace(/[^A-Za-z0-9]/g, '').slice(0, 4).toUpperCase();
+          sku = `${cleanName || 'ITEM'}-${slNo}`;
+        }
+
+        // Auto ensure category exists
+        try {
+          await Category.findOneAndUpdate(
+            { name: categoryName },
+            { name: categoryName },
+            { upsert: true, new: true }
+          );
+        } catch {}
+
+        // Find existing product by _id, sku, or name
+        let product: any = null;
+        if (item._id && mongoose.Types.ObjectId.isValid(item._id)) {
+          product = await Product.findById(item._id);
+        }
+        if (!product) {
+          product = await Product.findOne({ $or: [{ sku }, { name }] });
+        }
+
+        if (product) {
+          // Update existing product
+          product.name = name;
+          product.slNo = slNo;
+          product.category = categoryName;
+          product.brand = brand || product.brand;
+          product.unit = unit;
+          product.mrp = mrp;
+          product.discount = discount;
+          product.rate = rate;
+          if (typeof product.stock !== 'number') product.stock = rawStock;
+          product.isActive = item.isActive !== false;
+          await product.save();
+
+          // Ensure inventory exists
+          let inv = await Inventory.findOne({ productId: product._id });
+          if (!inv) {
+            inv = await Inventory.create({
+              productId: product._id,
+              sku: product.sku,
+              productName: product.name,
+              category: product.category,
+              godownStock: rawStock,
+              shopStock: 0,
+              minGodownStock: product.minGodownStock || 10,
+              minShopStock: product.minShopStock || 5,
+              lastMovementAt: new Date(),
+            });
+          } else {
+            inv.productName = product.name;
+            inv.category = product.category;
+            await inv.save();
+          }
+          updatedCount++;
+        } else {
+          // Create new product matching billing particular's _id if valid
+          const productData: any = {
+            slNo,
+            name,
+            sku,
+            category: categoryName,
+            brand,
+            unit,
+            mrp,
+            discount,
+            rate,
+            stock: rawStock,
+            minGodownStock: 10,
+            minShopStock: 5,
+            isActive: item.isActive !== false,
+          };
+
+          if (item._id && mongoose.Types.ObjectId.isValid(item._id)) {
+            productData._id = item._id;
+          }
+
+          product = await Product.create(productData);
+
+          await Inventory.create({
+            productId: product._id,
+            sku: product.sku,
+            productName: product.name,
+            category: product.category,
+            godownStock: rawStock,
+            shopStock: 0,
+            minGodownStock: 10,
+            minShopStock: 5,
+            lastMovementAt: new Date(),
+          });
+          syncedCount++;
+        }
+      }
+
+      console.log(`[Stock Sync] ✅ Synchronized ${syncedCount + updatedCount} products from '${targetColName}' (${syncedCount} new, ${updatedCount} updated).`);
+      return {
+        syncedCount,
+        updatedCount,
+        totalParticulars: particulars.length,
+        message: `Successfully synced ${syncedCount + updatedCount} items from Billing (${targetColName})`,
+      };
+    } catch (err: any) {
+      console.error('[Stock Sync Error]:', err);
+      throw err;
+    }
+  }
+
+  /**
    * Set or initialize opening stock for a product
    */
   static async setOpeningStock(params: {
