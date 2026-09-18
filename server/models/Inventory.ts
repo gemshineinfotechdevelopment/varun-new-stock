@@ -18,7 +18,17 @@ export interface IInventory extends Document {
 const InventorySchema = new Schema<IInventory>(
   {
     productId: { type: Schema.Types.ObjectId, ref: 'Product', required: true, unique: true },
-    sku: { type: String, required: true, unique: true, uppercase: true, trim: true },
+    sku: {
+      type: String,
+      unique: true,
+      uppercase: true,
+      trim: true,
+      default: function (this: any) {
+        const rawName = (this.productName || 'ITEM').replace(/[^A-Za-z0-9]/g, '').slice(0, 4).toUpperCase();
+        const prefix = rawName || 'ITEM';
+        return `${prefix}-${Date.now().toString().slice(-4)}`;
+      },
+    },
     productName: { type: String, required: true, trim: true },
     category: { type: String, required: true, trim: true, default: 'General' },
     godownStock: { type: Number, required: true, default: 0, min: 0 },
@@ -33,6 +43,18 @@ const InventorySchema = new Schema<IInventory>(
     toObject: { virtuals: true },
   }
 );
+
+InventorySchema.pre('validate', function (next) {
+  if (!this.sku || !this.sku.trim()) {
+    const rawName = (this.productName || 'ITEM').replace(/[^A-Za-z0-9]/g, '').slice(0, 4).toUpperCase();
+    const prefix = rawName || 'ITEM';
+    this.sku = `${prefix}-${Date.now().toString().slice(-4)}`;
+  }
+  if (this.sku) {
+    this.sku = this.sku.trim().toUpperCase();
+  }
+  next();
+});
 
 // Virtual field for totalStock = godownStock + shopStock
 InventorySchema.virtual('totalStock').get(function (this: IInventory) {

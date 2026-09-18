@@ -24,7 +24,17 @@ const ProductSchema = new Schema<IProduct>(
   {
     slNo: { type: Number },
     name: { type: String, required: true, trim: true },
-    sku: { type: String, required: true, unique: true, trim: true, uppercase: true },
+    sku: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: function (this: any) {
+        const rawName = (this.name || 'ITEM').replace(/[^A-Za-z0-9]/g, '').slice(0, 4).toUpperCase();
+        const prefix = rawName || 'ITEM';
+        const num = this.slNo || Math.floor(1000 + Math.random() * 9000);
+        return `${prefix}-${num}`;
+      },
+    },
     category: { type: String, required: true, trim: true, default: 'General' },
     brand: { type: String, default: '', trim: true },
     unit: { type: String, default: 'PCS', trim: true },
@@ -43,6 +53,19 @@ const ProductSchema = new Schema<IProduct>(
     strict: false,
   }
 );
+
+ProductSchema.pre('validate', function (next) {
+  if (!this.sku || !this.sku.trim()) {
+    const rawName = (this.name || 'ITEM').replace(/[^A-Za-z0-9]/g, '').slice(0, 4).toUpperCase();
+    const prefix = rawName || 'ITEM';
+    const num = this.slNo || Math.floor(1000 + Math.random() * 9000);
+    this.sku = `${prefix}-${num}`;
+  }
+  if (this.sku) {
+    this.sku = this.sku.trim().toUpperCase();
+  }
+  next();
+});
 
 ProductSchema.index({ name: 1 });
 ProductSchema.index({ category: 1 });

@@ -106,20 +106,26 @@ export const createProduct = async (req: AuthRequest, res: Response): Promise<vo
       shopOpeningStock = 0,
     } = req.body;
 
-    if (!name || !sku) {
-      res.status(400).json({ success: false, message: 'Product Name and SKU are required' });
+    if (!name || !name.trim()) {
+      res.status(400).json({ success: false, message: 'Product Name is required' });
       return;
     }
 
-    const existing = await Product.findOne({ sku: sku.trim().toUpperCase() });
+    let finalSku = (sku || '').trim().toUpperCase();
+    if (!finalSku) {
+      const cleanName = name.replace(/[^A-Za-z0-9]/g, '').slice(0, 4).toUpperCase();
+      finalSku = `${cleanName || 'ITEM'}-${Date.now().toString().slice(-4)}`;
+    }
+
+    const existing = await Product.findOne({ sku: finalSku });
     if (existing) {
-      res.status(400).json({ success: false, message: `A product with SKU '${sku}' already exists` });
+      res.status(400).json({ success: false, message: `A product with SKU '${finalSku}' already exists` });
       return;
     }
 
     const product = await Product.create({
       name: name.trim(),
-      sku: sku.trim().toUpperCase(),
+      sku: finalSku,
       category: category || 'General',
       brand: brand || '',
       unit: unit || 'PCS',
