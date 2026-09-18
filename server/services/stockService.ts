@@ -18,6 +18,9 @@ export class StockService {
   /**
    * Auto-sync / Import particulars from Billing database collection (`particulars` or `items`)
    */
+  /**
+   * Auto-sync / Import products from Billing database collection (`pricelists`, `items`, or `particulars`)
+   */
   static async syncFromBillingParticulars(): Promise<{
     syncedCount: number;
     updatedCount: number;
@@ -30,38 +33,56 @@ export class StockService {
       }
 
       const collections = await mongoose.connection.db.listCollections().toArray();
-      const collectionNames = collections.map((c) => c.name);
-
-      const targetColName = collectionNames.find((n) =>
-        ['particulars', 'particular', 'items', 'products_billing'].includes(n.toLowerCase())
-      );
-
-      if (!targetColName) {
-        console.log('[Stock Sync] No particulars collection found in database.');
-        return { syncedCount: 0, updatedCount: 0, totalParticulars: 0, message: 'No particulars collection found in database' };
-      }
-
-      const particularsCol = mongoose.connection.db.collection(targetColName);
-      const particulars = await particularsCol.find({}).toArray();
-
-      if (!particulars || particulars.length === 0) {
-        console.log(`[Stock Sync] Collection '${targetColName}' is empty.`);
-        return { syncedCount: 0, updatedCount: 0, totalParticulars: 0, message: 'No particulars to sync' };
-      }
+      const collectionNames = collections.map((c) => c.name.toLowerCase());
 
       const { Category } = require('../models/Category');
       let syncedCount = 0;
       let updatedCount = 0;
+      let rawItemsList: any[] = [];
 
-      for (let i = 0; i < particulars.length; i++) {
-        const item = particulars[i];
+      // 1. Check `pricelists` or `items` or `products_billing`
+      for (const colName of ['pricelists', 'pricelist', 'items', 'products_billing']) {
+        if (collectionNames.includes(colName)) {
+          const col = mongoose.connection.db.collection(colName);
+          const docs = await col.find({}).toArray();
+          if (docs && docs.length > 0) {
+            for (const doc of docs) {
+              if (Array.isArray(doc.items)) {
+                rawItemsList.push(...doc.items);
+              } else if (Array.isArray(doc.products)) {
+                rawItemsList.push(...doc.products);
+              } else if (Array.isArray(doc.particulars)) {
+                rawItemsList.push(...doc.particulars);
+              } else if (doc.name || doc.particular || doc.itemName) {
+                rawItemsList.push(doc);
+              }
+            }
+          }
+        }
+      }
+
+      // 2. Also check if particulars collection has catalog items (documents WITHOUT billNo or customerPhone)
+      if (collectionNames.includes('particulars')) {
+        const pCol = mongoose.connection.db.collection('particulars');
+        const pDocs = await pCol.find({ billNo: { $exists: false }, customerName: { $exists: false } }).toArray();
+        if (pDocs && pDocs.length > 0) {
+          rawItemsList.push(...pDocs);
+        }
+      }
+
+      if (rawItemsList.length === 0) {
+        return { syncedCount: 0, updatedCount: 0, totalParticulars: 0, message: 'No catalog items found in database' };
+      }
+
+      for (let i = 0; i < rawItemsList.length; i++) {
+        const item = rawItemsList[i];
         const name = String(item.name || item.particular || item.itemName || item.particularName || '').trim();
         if (!name) continue;
 
         const slNo = Number(item.slNo || item.sno || item.sNo || i + 1) || (i + 1);
         const categoryName = String(item.category || 'General').trim() || 'General';
         const brand = String(item.brand || '').trim();
-        const unit = String(item.unit || 'PCS').trim() || 'PCS';
+        const unit = String(item.pktUnit || item.unit || 'PCS').trim() || 'PCS';
         const mrp = Number(item.mrp || 0) || 0;
         const discount = Number(item.discount || 0) || 0;
         let rate = Number(item.rate || 0) || 0;
@@ -95,7 +116,6 @@ export class StockService {
         }
 
         if (product) {
-          // Update existing product
           product.name = name;
           product.slNo = slNo;
           product.category = categoryName;
@@ -108,7 +128,6 @@ export class StockService {
           product.isActive = item.isActive !== false;
           await product.save();
 
-          // Ensure inventory exists
           let inv = await Inventory.findOne({ productId: product._id });
           if (!inv) {
             inv = await Inventory.create({
@@ -125,14 +144,12 @@ export class StockService {
           } else {
             inv.productName = product.name;
             inv.category = product.category;
-            // Update shopStock to match billing particulars stock directly
             inv.shopStock = rawStock;
             inv.lastMovementAt = new Date();
             await inv.save();
           }
           updatedCount++;
         } else {
-          // Create new product matching billing particular's _id if valid
           const productData: any = {
             slNo,
             name,
@@ -170,12 +187,12 @@ export class StockService {
         }
       }
 
-      console.log(`[Stock Sync] ✅ Synchronized ${syncedCount + updatedCount} products from '${targetColName}' (${syncedCount} new, ${updatedCount} updated).`);
+      console.log(`[Stock Sync] ✅ Synchronized ${syncedCount + updatedCount} products (${syncedCount} new, ${updatedCount} updated).`);
       return {
         syncedCount,
         updatedCount,
-        totalParticulars: particulars.length,
-        message: `Successfully synced ${syncedCount + updatedCount} items from Billing (${targetColName})`,
+        totalParticulars: rawItemsList.length,
+        message: `Successfully synced ${syncedCount + updatedCount} items from Billing`,
       };
     } catch (err: any) {
       console.error('[Stock Sync Error]:', err);
@@ -184,7 +201,8 @@ export class StockService {
   }
 
   /**
-   * Automatically detect and process any bills in MongoDB `bills` collection that haven't been processed yet
+   * Automatically detect and process any bills in MongoDB `particulars`, `bills`, `invoices`, `sales`
+   * that haven't been processed yet and immediately deduct from Shop Stock.
    */
   static async syncNewBillsFromDb(): Promise<{
     processedBills: number;
@@ -199,8 +217,9 @@ export class StockService {
       const collections = await mongoose.connection.db.listCollections().toArray();
       const colNames = collections.map((c) => c.name);
 
+      // Target collections for bills: 'particulars' (Billing bill collection), 'bills', 'invoices', 'sales', 'orders'
       const targetCols = colNames.filter((n) =>
-        ['bills', 'bill', 'invoices', 'invoice', 'sales', 'sale', 'orders', 'order', 'customertransactions', 'transactions', 'estimates', 'estimate', 'billings', 'billing'].includes(n.toLowerCase())
+        ['particulars', 'bills', 'bill', 'invoices', 'invoice', 'sales', 'sale', 'orders', 'order', 'customertransactions', 'estimates', 'billings'].includes(n.toLowerCase())
       );
 
       if (targetCols.length === 0) {
@@ -217,9 +236,15 @@ export class StockService {
 
         for (const bill of allBills) {
           const billId = String(bill._id || bill.id || '').trim();
-          const billNumber = String(bill.billNumber || bill.billNo || bill.invoiceNo || bill.invNo || bill.bill_no || (bill.slNo ? `BILL-${bill.slNo}` : billId)).trim();
+          const billNumber = String(bill.billNo || bill.billNumber || bill.invoiceNo || bill.invNo || bill.bill_no || (bill.slNo ? `BILL-${bill.slNo}` : billId)).trim();
 
           if (!billId || !billNumber) continue;
+
+          // Extract items / products array from bill
+          const rawItems = bill.products || bill.items || bill.particulars || bill.lines || bill.rows || bill.cart || [];
+          if (!Array.isArray(rawItems) || rawItems.length === 0) {
+            continue;
+          }
 
           // Check if already processed
           const existing = await IntegrationEvent.findOne({
@@ -233,15 +258,18 @@ export class StockService {
             continue;
           }
 
-          // Extract items array from bill
-          const rawItems = bill.items || bill.particulars || bill.products || bill.lines || bill.rows || bill.cart || [];
-          if (!Array.isArray(rawItems) || rawItems.length === 0) {
-            continue;
-          }
-
           const normalizedItems = rawItems
             .map((it: any) => {
-              const pName = String(it.productName || it.particularName || it.particular?.name || (typeof it.particular === 'string' ? it.particular : '') || it.name || it.itemName || it.item || '').trim();
+              const pName = String(
+                it.particular ||
+                it.particularName ||
+                it.productName ||
+                it.name ||
+                it.itemName ||
+                it.particular?.name ||
+                (typeof it.particular === 'string' ? it.particular : '') ||
+                ''
+              ).trim();
               const pQty = Number(it.quantity ?? it.qty ?? it.count ?? it.pcs ?? it.box ?? it.units ?? it.noOfUnits ?? 0) || 0;
               const pId = it.productId || it.particularId || it.particular?._id || it._id || it.id;
               const pSku = it.sku || it.itemCode || it.code || it.particularCode;
