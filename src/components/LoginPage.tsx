@@ -12,7 +12,7 @@ import {
   CircularProgress,
   Chip,
 } from '@mui/material';
-import { Lock, User, Eye, EyeOff, Package, ShieldCheck } from 'lucide-react';
+import { Lock, User, Eye, EyeOff, ShieldCheck } from 'lucide-react';
 import { AuthApi } from '../services/api';
 import varunLogo from '../assets/varun-logo.png';
 
