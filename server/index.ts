@@ -24,7 +24,7 @@ import settingsRoutes from './routes/settingsRoutes';
 import auditLogRoutes from './routes/auditLogRoutes';
 
 const app: Application = express();
-const PORT = process.env.PORT || 5020;
+const PORT = process.env.PORT || 5013;
 
 // Connect Database & Seed default data
 connectDB().then(() => {
@@ -39,6 +39,8 @@ const envOrigins = (process.env.CORS_ORIGIN || '')
 
 const allowedOrigins = [
   ...envOrigins,
+  'https://varun-traders-stock.gemshine.tech',
+  'http://varun-traders-stock.gemshine.tech',
   'https://varun-traders-billing.gemshine.tech',
   'http://varun-traders-billing.gemshine.tech',
   'http://localhost:5000',
@@ -47,6 +49,8 @@ const allowedOrigins = [
   'http://127.0.0.1:5173',
   'http://localhost:5174',
   'http://127.0.0.1:5174',
+  'http://localhost:5013',
+  'http://127.0.0.1:5013',
   'http://localhost:5020',
   'http://127.0.0.1:5020',
   'http://localhost:3000',

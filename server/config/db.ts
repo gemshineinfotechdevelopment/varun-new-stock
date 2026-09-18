@@ -6,7 +6,7 @@ export const connectDB = async (retryCount = 0): Promise<void> => {
   let uri =
     process.env.MONGODB_URI ||
     process.env.MONGO_URI ||
-    'mongodb://127.0.0.1:27017/varun_stock_db';
+    'mongodb://127.0.0.1:27017/varun_trade_db';
 
   if (uri.includes('<') && uri.includes('>')) {
     uri = uri.replace(/<([^>]+)>/g, '$1');
