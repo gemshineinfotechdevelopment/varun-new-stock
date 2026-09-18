@@ -17,9 +17,9 @@ import { Save, ShieldCheck, Key, Eye, EyeOff, User } from 'lucide-react';
 import { SettingsApi, AuthApi } from '../services/api';
 
 export const SettingsPage: React.FC = () => {
-  const [companyName, setCompanyName] = useState('Varun Trade Stock Maintenance');
+  const [companyName, setCompanyName] = useState('Varun Traders');
   const [godownName, setGodownName] = useState('Main Godown (Warehouse)');
-  const [shopName, setShopName] = useState('Varun Trade Shop Counter');
+  const [shopName, setShopName] = useState('Varun Traders Shop Counter');
 
   // Admin Account Settings
   const [adminName, setAdminName] = useState('Admin');
@@ -41,9 +41,9 @@ export const SettingsPage: React.FC = () => {
 
       if (setRes.success && setRes.data) {
         const d = setRes.data;
-        setCompanyName(d.companyName || 'Varun Trade Stock Maintenance');
+        setCompanyName(d.companyName || 'Varun Traders');
         setGodownName(d.godownName || 'Main Godown (Warehouse)');
-        setShopName(d.shopName || 'Varun Trade Shop Counter');
+        setShopName(d.shopName || 'Varun Traders Shop Counter');
       }
 
       if (meRes.success && meRes.user) {

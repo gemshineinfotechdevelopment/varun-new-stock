@@ -14,9 +14,9 @@ export interface ISettings extends Document {
 
 const SettingsSchema = new Schema<ISettings>(
   {
-    companyName: { type: String, default: 'Varun Trade Stock Maintenance' },
+    companyName: { type: String, default: 'Varun Traders' },
     godownName: { type: String, default: 'Main Godown (Warehouse)' },
-    shopName: { type: String, default: 'Varun Trade Shop' },
+    shopName: { type: String, default: 'Varun Traders Shop' },
     integrationApiKey: { type: String, default: 'varun_stock_integration_secret_key_xyz890' },
     billingApiUrl: { type: String, default: 'http://localhost:5011' },
     autoSyncEnabled: { type: Boolean, default: true },

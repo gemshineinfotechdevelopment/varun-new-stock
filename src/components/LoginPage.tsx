@@ -14,6 +14,7 @@ import {
 } from '@mui/material';
 import { Lock, User, Eye, EyeOff, Package, ShieldCheck } from 'lucide-react';
 import { AuthApi } from '../services/api';
+import varunLogo from '../assets/varun-logo.png';
 
 interface LoginPageProps {
   onLoginSuccess: (user: { name: string; username: string; role: string }, token: string) => void;
@@ -95,26 +96,25 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
           }}
         >
           <Box
+            component="img"
+            src={varunLogo}
+            alt="Varun Traders"
             sx={{
-              width: 56,
-              height: 56,
-              borderRadius: '16px',
-              backgroundColor: '#4f46e5',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#ffffff',
-              boxShadow: '0 8px 16px rgba(79, 70, 229, 0.4)',
+              width: 80,
+              height: 80,
+              borderRadius: '50%',
+              objectFit: 'cover',
+              boxShadow: '0 8px 25px rgba(251, 191, 36, 0.35)',
+              border: '3px solid rgba(251, 191, 36, 0.8)',
               mb: 1.5,
+              display: 'inline-block',
             }}
-          >
-            <Package size={30} />
-          </Box>
-          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5 }}>
-            Varun Trade Stock
+          />
+          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '-0.02em', mb: 0.5, color: '#ffffff' }}>
+            Varun Traders
           </Typography>
-          <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.85rem' }}>
-            Godown & Shop Physical Inventory System (PCS)
+          <Typography variant="body2" sx={{ color: '#fbbf24', fontSize: '0.82rem', fontWeight: 600 }}>
+            Stock Maintenance & Godown System (PCS)
           </Typography>
         </Box>
 

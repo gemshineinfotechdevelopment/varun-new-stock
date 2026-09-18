@@ -105,7 +105,7 @@ app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 app.get('/api/health', (_req: Request, res: Response) => {
   res.status(200).json({
     status: 'OK',
-    app: 'Varun Trade Stock Maintenance',
+    app: 'Varun Traders Stock Maintenance',
     port: PORT,
     timestamp: new Date().toISOString(),
   });
@@ -114,7 +114,7 @@ app.get('/api/health', (_req: Request, res: Response) => {
 app.get('/', (_req: Request, res: Response) => {
   res.status(200).json({
     status: 'OK',
-    service: 'Varun Trade Stock Maintenance API',
+    service: 'Varun Traders Stock Maintenance API',
     health: '/api/health',
     integration: '/api/integration/billing/health',
   });
@@ -139,7 +139,7 @@ app.use(errorHandler);
 // Start Server
 app.listen(PORT, () => {
   console.log(`=======================================================`);
-  console.log(` 📦 Varun Trade Stock Maintenance Server running on port ${PORT}`);
+  console.log(` 📦 Varun Traders Stock Maintenance Server running on port ${PORT}`);
   console.log(` 🔗 Health check: http://localhost:${PORT}/api/health`);
   console.log(` ⚡ Integration API: http://localhost:${PORT}/api/integration/billing/sale`);
   console.log(` 🌐 Environment: ${process.env.NODE_ENV || 'development'}`);

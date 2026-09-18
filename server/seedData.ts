@@ -38,9 +38,9 @@ export const seedDatabase = async (): Promise<void> => {
     const existingSettings = await Settings.findOne();
     if (!existingSettings) {
       await Settings.create({
-        companyName: 'Varun Trade Stock Maintenance',
+        companyName: 'Varun Traders',
         godownName: 'Main Godown (Warehouse)',
-        shopName: 'Varun Trade Shop',
+        shopName: 'Varun Traders Shop',
         integrationApiKey: process.env.BILLING_INTEGRATION_SECRET || 'varun_stock_integration_secret_key_xyz890',
         billingApiUrl: process.env.BILLING_API_URL || 'http://localhost:5011',
         autoSyncEnabled: true,

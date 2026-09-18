@@ -31,7 +31,7 @@ function App() {
 
   useEffect(() => {
     const updateTitle = async () => {
-      document.title = 'Varun Trade — Stock Maintenance & Godown System';
+      document.title = 'Varun Traders — Stock Maintenance & Godown System';
       try {
         const res = await SettingsApi.get();
         if (res.success && res.data?.companyName) {

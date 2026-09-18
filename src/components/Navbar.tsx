@@ -25,6 +25,8 @@ import {
   Menu as MenuIcon,
 } from 'lucide-react';
 
+import varunLogo from '../assets/varun-logo.png';
+
 export type NavTab =
   | 'Dashboard'
   | 'Stock Overview'
@@ -126,48 +128,46 @@ export const Navbar: React.FC<NavbarProps> = ({
           onClick={() => onSelectTab('Dashboard')}
         >
           <Box
+            component="img"
+            src={varunLogo}
+            alt="Varun Traders"
             sx={{
-              width: 32,
-              height: 32,
-              borderRadius: '8px',
-              backgroundColor: '#4f46e5',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#ffffff',
+              width: 38,
+              height: 38,
+              borderRadius: '50%',
+              objectFit: 'cover',
+              boxShadow: '0 2px 10px rgba(251, 191, 36, 0.3)',
+              border: '2px solid rgba(251, 191, 36, 0.6)',
               flexShrink: 0,
-              boxShadow: '0 2px 8px rgba(79, 70, 229, 0.4)',
             }}
-          >
-            <Package size={18} />
-          </Box>
+          />
           <Box sx={{ flexShrink: 0, whiteSpace: 'nowrap' }}>
             <Typography
               variant="h6"
               sx={{
                 fontWeight: 800,
                 color: '#ffffff',
-                fontSize: { xs: '0.92rem', md: '1.02rem' },
+                fontSize: { xs: '0.95rem', md: '1.05rem' },
                 lineHeight: 1.15,
                 letterSpacing: '-0.02em',
                 whiteSpace: 'nowrap',
               }}
             >
-              Varun Trade
+              Varun Traders
             </Typography>
             <Typography
               variant="caption"
               sx={{
-                color: '#94a3b8',
+                color: '#fbbf24',
                 fontWeight: 700,
                 fontSize: '0.62rem',
                 textTransform: 'uppercase',
-                letterSpacing: '0.08em',
+                letterSpacing: '0.06em',
                 display: 'block',
                 whiteSpace: 'nowrap',
               }}
             >
-              Godown &amp; Shop Stock
+              Crackers • Stock Maintenance
             </Typography>
           </Box>
         </Box>
