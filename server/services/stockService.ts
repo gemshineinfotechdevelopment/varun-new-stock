@@ -1,0 +1,630 @@
+import mongoose from 'mongoose';
+import { Inventory, IInventory } from '../models/Inventory';
+import { Product, IProduct } from '../models/Product';
+import { StockTransaction, IStockTransaction } from '../models/StockTransaction';
+import { StockTransfer, IStockTransfer } from '../models/StockTransfer';
+import { StockAdjustment, IStockAdjustment } from '../models/StockAdjustment';
+import { IntegrationEvent, IIntegrationEvent } from '../models/IntegrationEvent';
+import { AuditLog } from '../models/AuditLog';
+
+// Helper to generate sequential formatted IDs
+export const generateId = (prefix: string): string => {
+  const dateStr = new Date().toISOString().slice(2, 10).replace(/-/g, '');
+  const rand = Math.floor(1000 + Math.random() * 9000);
+  return `${prefix}-${dateStr}-${rand}`;
+};
+
+export class StockService {
+  /**
+   * Set or initialize opening stock for a product
+   */
+  static async setOpeningStock(params: {
+    productId: string | mongoose.Types.ObjectId;
+    godownQty: number;
+    shopQty: number;
+    user?: string;
+  }): Promise<{ inventory: IInventory; transactions: IStockTransaction[] }> {
+    const { productId, godownQty, shopQty, user = 'Admin' } = params;
+
+    const product = await Product.findById(productId);
+    if (!product) {
+      throw new Error(`Product not found with ID ${productId}`);
+    }
+
+    let inventory = await Inventory.findOne({ productId });
+    const beforeGodown = inventory ? inventory.godownStock : 0;
+    const beforeShop = inventory ? inventory.shopStock : 0;
+
+    if (!inventory) {
+      inventory = new Inventory({
+        productId: product._id,
+        sku: product.sku,
+        productName: product.name,
+        category: product.category,
+        godownStock: Math.max(0, godownQty),
+        shopStock: Math.max(0, shopQty),
+        minGodownStock: product.minGodownStock,
+        minShopStock: product.minShopStock,
+        lastMovementAt: new Date(),
+      });
+    } else {
+      inventory.godownStock = Math.max(0, godownQty);
+      inventory.shopStock = Math.max(0, shopQty);
+      inventory.lastMovementAt = new Date();
+    }
+
+    await inventory.save();
+
+    const transactions: IStockTransaction[] = [];
+
+    // Create transaction if any quantity is set
+    if (godownQty > 0 || shopQty > 0 || beforeGodown !== godownQty || beforeShop !== shopQty) {
+      const tx = new StockTransaction({
+        transactionId: generateId('ST-OPN'),
+        productId: product._id,
+        sku: product.sku,
+        productName: product.name,
+        type: 'OPENING_STOCK',
+        location: 'BOTH',
+        quantity: godownQty + shopQty,
+        unit: product.unit || 'PCS',
+        beforeGodownStock: beforeGodown,
+        afterGodownStock: inventory.godownStock,
+        beforeShopStock: beforeShop,
+        afterShopStock: inventory.shopStock,
+        referenceId: 'OPENING_BALANCE',
+        referenceType: 'OPENING',
+        notes: `Opening stock configured: Godown=${godownQty} PCS, Shop=${shopQty} PCS`,
+        performedBy: user,
+      });
+      await tx.save();
+      transactions.push(tx);
+    }
+
+    await AuditLog.create({
+      user,
+      action: `Set Opening Stock: Godown=${godownQty} PCS, Shop=${shopQty} PCS`,
+      module: 'INVENTORY',
+      referenceId: product.sku,
+      oldValue: `Godown: ${beforeGodown}, Shop: ${beforeShop}`,
+      newValue: `Godown: ${inventory.godownStock}, Shop: ${inventory.shopStock}`,
+    });
+
+    return { inventory, transactions };
+  }
+
+  /**
+   * 2-Way Stock Transfer (Godown -> Shop AND Shop -> Godown)
+   */
+  static async transferStock(params: {
+    items: Array<{ productId: string; transferQuantity: number }>;
+    direction?: 'GODOWN_TO_SHOP' | 'SHOP_TO_GODOWN';
+    remarks?: string;
+    transferredBy?: string;
+  }): Promise<IStockTransfer> {
+    const { items, direction = 'GODOWN_TO_SHOP', remarks = '', transferredBy = 'Admin' } = params;
+    const isShopToGodown = direction === 'SHOP_TO_GODOWN';
+    const fromLoc = isShopToGodown ? 'SHOP' : 'GODOWN';
+    const toLoc = isShopToGodown ? 'GODOWN' : 'SHOP';
+
+    if (!items || items.length === 0) {
+      throw new Error('Transfer must include at least one item');
+    }
+
+    // Step 1: Pre-validate all items
+    const validatedItems: Array<{
+      product: IProduct;
+      inventory: IInventory;
+      transferQty: number;
+    }> = [];
+
+    for (const item of items) {
+      if (!item.transferQuantity || item.transferQuantity <= 0) {
+        throw new Error(`Transfer quantity must be greater than 0`);
+      }
+
+      const product = await Product.findById(item.productId);
+      if (!product) {
+        throw new Error(`Product not found with ID ${item.productId}`);
+      }
+
+      const inventory = await Inventory.findOne({ productId: item.productId });
+      if (!inventory) {
+        throw new Error(`Inventory not found for product ${product.name} (${product.sku})`);
+      }
+
+      const availableSource = isShopToGodown ? inventory.shopStock : inventory.godownStock;
+      if (availableSource < item.transferQuantity) {
+        throw new Error(
+          `Insufficient ${isShopToGodown ? 'Shop' : 'Godown'} stock for '${product.name}' (${product.sku}). Available: ${availableSource} PCS, Requested: ${item.transferQuantity} PCS.`
+        );
+      }
+
+      validatedItems.push({
+        product,
+        inventory,
+        transferQty: item.transferQuantity,
+      });
+    }
+
+    const transferNumber = generateId('TR');
+    let totalQty = 0;
+    const transferItemsData = [];
+
+    // Step 2: Perform atomic transfers and record transactions
+    for (const { product, inventory, transferQty } of validatedItems) {
+      const beforeGodown = inventory.godownStock;
+      const beforeShop = inventory.shopStock;
+
+      const query = isShopToGodown
+        ? { _id: inventory._id, shopStock: { $gte: transferQty } }
+        : { _id: inventory._id, godownStock: { $gte: transferQty } };
+
+      const update = isShopToGodown
+        ? {
+            $inc: { shopStock: -transferQty, godownStock: transferQty },
+            $set: { lastMovementAt: new Date() },
+          }
+        : {
+            $inc: { godownStock: -transferQty, shopStock: transferQty },
+            $set: { lastMovementAt: new Date() },
+          };
+
+      const updated = await Inventory.findOneAndUpdate(query, update, { new: true });
+
+      if (!updated) {
+        throw new Error(
+          `Concurrent update conflict or insufficient ${isShopToGodown ? 'Shop' : 'Godown'} stock for ${product.name} (${product.sku})`
+        );
+      }
+
+      totalQty += transferQty;
+
+      transferItemsData.push({
+        productId: product._id,
+        sku: product.sku,
+        productName: product.name,
+        unit: product.unit || 'PCS',
+        godownAvailableBefore: beforeGodown,
+        transferQuantity: transferQty,
+        shopAvailableBefore: beforeShop,
+      });
+
+      // Create immutable transaction ledger record
+      await StockTransaction.create({
+        transactionId: generateId('ST-TRF'),
+        productId: product._id,
+        sku: product.sku,
+        productName: product.name,
+        type: isShopToGodown ? 'SHOP_TO_GODOWN' : 'GODOWN_TO_SHOP',
+        location: 'BOTH',
+        quantity: transferQty,
+        unit: product.unit || 'PCS',
+        beforeGodownStock: beforeGodown,
+        afterGodownStock: updated.godownStock,
+        beforeShopStock: beforeShop,
+        afterShopStock: updated.shopStock,
+        referenceId: transferNumber,
+        referenceType: 'TRANSFER',
+        notes: `Transferred ${transferQty} PCS from ${isShopToGodown ? 'Shop to Godown' : 'Godown to Shop'}. ${remarks}`.trim(),
+        performedBy: transferredBy,
+      });
+    }
+
+    const transferDoc = await StockTransfer.create({
+      transferNumber,
+      transferDate: new Date(),
+      fromLocation: fromLoc,
+      toLocation: toLoc,
+      items: transferItemsData,
+      totalQuantity: totalQty,
+      status: 'COMPLETED',
+      remarks,
+      transferredBy,
+    });
+
+    await AuditLog.create({
+      user: transferredBy,
+      action: `Transferred ${totalQty} PCS from ${fromLoc} to ${toLoc} across ${items.length} items`,
+      module: 'TRANSFER',
+      referenceId: transferNumber,
+      newValue: `From: ${fromLoc}, To: ${toLoc}, Items: ${items.length}, Total PCS: ${totalQty}`,
+    });
+
+    return transferDoc;
+  }
+
+  static async transferGodownToShop(params: {
+    items: Array<{ productId: string; transferQuantity: number }>;
+    remarks?: string;
+    transferredBy?: string;
+  }): Promise<IStockTransfer> {
+    return this.transferStock({ ...params, direction: 'GODOWN_TO_SHOP' });
+  }
+
+  /**
+   * Process Billing Sale from Varun Trade Billing application
+   * Deducts ONLY from Shop Stock
+   * Guaranteed Idempotency
+   */
+  static async processBillingSale(
+    billData: {
+      billId: string;
+      billNumber: string;
+      customerId?: string;
+      items: Array<{
+        productId?: string;
+        sku?: string;
+        productName?: string;
+        quantity: number;
+      }>;
+      billDate?: string | Date;
+    },
+    idempotencyKey?: string
+  ): Promise<{
+    success: boolean;
+    alreadyProcessed?: boolean;
+    status: string;
+    message: string;
+    billNumber: string;
+    items?: any[];
+  }> {
+    const { billId, billNumber, items } = billData;
+
+    if (!billId || !billNumber) {
+      throw new Error('Missing required fields: billId and billNumber');
+    }
+
+    if (!items || items.length === 0) {
+      throw new Error('Sale must contain at least one item');
+    }
+
+    // Step 1: Check Idempotency - Has this bill already been processed?
+    const existingEvent = await IntegrationEvent.findOne({
+      $or: [
+        { externalBillId: billId },
+        { billNumber: billNumber },
+        ...(idempotencyKey ? [{ idempotencyKey }] : []),
+      ],
+      eventType: 'BILL_SALE',
+    });
+
+    if (existingEvent && existingEvent.status === 'PROCESSED') {
+      return {
+        success: true,
+        alreadyProcessed: true,
+        status: 'PROCESSED',
+        message: 'Stock for this bill has already been processed (Idempotent response)',
+        billNumber: existingEvent.billNumber,
+        items: existingEvent.items,
+      };
+    }
+
+    // Step 2: Validate all items and check shop stock availability
+    const validatedItems: Array<{
+      product: IProduct;
+      inventory: IInventory;
+      quantity: number;
+    }> = [];
+
+    for (const item of items) {
+      if (!item.quantity || item.quantity <= 0) {
+        continue;
+      }
+
+      // Find product by SKU or productId or name
+      let product: IProduct | null = null;
+      if (item.productId && mongoose.Types.ObjectId.isValid(item.productId)) {
+        product = await Product.findById(item.productId);
+      }
+      if (!product && item.sku) {
+        product = await Product.findOne({ sku: item.sku.trim().toUpperCase() });
+      }
+      if (!product && item.productName) {
+        product = await Product.findOne({ name: item.productName.trim() });
+      }
+
+      if (!product) {
+        throw new Error(
+          `Product not found in Stock System: SKU '${item.sku || 'N/A'}' / Name '${item.productName || 'N/A'}'`
+        );
+      }
+
+      const inventory = await Inventory.findOne({ productId: product._id });
+      if (!inventory) {
+        throw new Error(`Inventory record not found for product ${product.name} (${product.sku})`);
+      }
+
+      if (inventory.shopStock < item.quantity) {
+        return {
+          success: false,
+          status: 'INSUFFICIENT_STOCK',
+          message: `Insufficient shop stock for '${product.name}' (${product.sku}). Available in Shop: ${inventory.shopStock} PCS, Requested: ${item.quantity} PCS.`,
+          billNumber,
+        };
+      }
+
+      validatedItems.push({
+        product,
+        inventory,
+        quantity: item.quantity,
+      });
+    }
+
+    if (validatedItems.length === 0) {
+      throw new Error('No valid items with quantity > 0 found in bill');
+    }
+
+    // Step 3: Perform atomic deduction from Shop Stock and log transactions
+    const processedItemsSummary: any[] = [];
+
+    for (const { product, inventory, quantity } of validatedItems) {
+      const beforeShop = inventory.shopStock;
+      const beforeGodown = inventory.godownStock;
+
+      const updated = await Inventory.findOneAndUpdate(
+        { _id: inventory._id, shopStock: { $gte: quantity } },
+        {
+          $inc: { shopStock: -quantity },
+          $set: { lastMovementAt: new Date() },
+        },
+        { new: true }
+      );
+
+      if (!updated) {
+        throw new Error(
+          `Concurrency conflict: Shop stock changed during deduction for ${product.name} (${product.sku})`
+        );
+      }
+
+      processedItemsSummary.push({
+        productId: product._id.toString(),
+        sku: product.sku,
+        productName: product.name,
+        quantity,
+        shopStockBefore: beforeShop,
+        shopStockAfter: updated.shopStock,
+      });
+
+      // Record transaction
+      await StockTransaction.create({
+        transactionId: generateId('ST-SALE'),
+        productId: product._id,
+        sku: product.sku,
+        productName: product.name,
+        type: 'BILL_SALE',
+        location: 'SHOP',
+        quantity: -quantity,
+        unit: product.unit || 'PCS',
+        beforeGodownStock: beforeGodown,
+        afterGodownStock: beforeGodown,
+        beforeShopStock: beforeShop,
+        afterShopStock: updated.shopStock,
+        referenceId: billNumber,
+        referenceType: 'BILL',
+        externalBillId: billId,
+        notes: `Deducted ${quantity} PCS for finalized Bill ${billNumber}`,
+        performedBy: 'Billing Integration',
+      });
+    }
+
+    // Step 4: Record Integration Event
+    await IntegrationEvent.create({
+      externalBillId: billId,
+      billNumber,
+      idempotencyKey,
+      eventType: 'BILL_SALE',
+      status: 'PROCESSED',
+      items: processedItemsSummary,
+      rawRequestPayload: billData,
+      responsePayload: { status: 'PROCESSED', itemsCount: processedItemsSummary.length },
+      processedAt: new Date(),
+    });
+
+    await AuditLog.create({
+      user: 'Billing Integration',
+      action: `Deducted Shop Stock for Bill ${billNumber}`,
+      module: 'BILLING_INTEGRATION',
+      referenceId: billNumber,
+      newValue: `Items processed: ${processedItemsSummary.length}`,
+    });
+
+    return {
+      success: true,
+      status: 'PROCESSED',
+      message: 'Shop stock updated successfully',
+      billNumber,
+      items: processedItemsSummary,
+    };
+  }
+
+  /**
+   * Process Stock Reversal when a finalized Bill is cancelled/deleted in Billing System
+   */
+  static async processBillingReversal(params: {
+    billId?: string;
+    billNumber?: string;
+    reason?: string;
+  }): Promise<{
+    success: boolean;
+    alreadyReversed?: boolean;
+    message: string;
+    billNumber: string;
+    itemsRestored?: number;
+  }> {
+    const { billId, billNumber, reason = 'Bill cancelled' } = params;
+
+    if (!billId && !billNumber) {
+      throw new Error('Must provide billId or billNumber for reversal');
+    }
+
+    const query: any = { eventType: 'BILL_SALE' };
+    if (billId) query.externalBillId = billId;
+    else if (billNumber) query.billNumber = billNumber;
+
+    const originalEvent = await IntegrationEvent.findOne(query);
+
+    if (!originalEvent) {
+      throw new Error(`Original billing sale event not found for bill ${billNumber || billId}`);
+    }
+
+    if (originalEvent.status === 'REVERSED') {
+      return {
+        success: true,
+        alreadyReversed: true,
+        message: `Stock for Bill ${originalEvent.billNumber} has already been reversed`,
+        billNumber: originalEvent.billNumber,
+      };
+    }
+
+    // Restore shop stock for each item in the original event
+    for (const item of originalEvent.items) {
+      const inventory = await Inventory.findOne({ sku: item.sku });
+      if (inventory) {
+        const beforeShop = inventory.shopStock;
+        const beforeGodown = inventory.godownStock;
+
+        const updated = await Inventory.findByIdAndUpdate(
+          inventory._id,
+          {
+            $inc: { shopStock: item.quantity },
+            $set: { lastMovementAt: new Date() },
+          },
+          { new: true }
+        );
+
+        if (updated) {
+          await StockTransaction.create({
+            transactionId: generateId('ST-REV'),
+            productId: inventory.productId,
+            sku: item.sku,
+            productName: item.productName,
+            type: 'SALE_REVERSAL',
+            location: 'SHOP',
+            quantity: item.quantity,
+            unit: 'PCS',
+            beforeGodownStock: beforeGodown,
+            afterGodownStock: beforeGodown,
+            beforeShopStock: beforeShop,
+            afterShopStock: updated.shopStock,
+            referenceId: originalEvent.billNumber,
+            referenceType: 'BILL',
+            externalBillId: originalEvent.externalBillId,
+            notes: `Restored ${item.quantity} PCS due to cancellation of Bill ${originalEvent.billNumber}. Reason: ${reason}`,
+            performedBy: 'Billing Integration',
+          });
+        }
+      }
+    }
+
+    originalEvent.status = 'REVERSED';
+    originalEvent.reversedAt = new Date();
+    originalEvent.reversalReason = reason;
+    await originalEvent.save();
+
+    await AuditLog.create({
+      user: 'Billing Integration',
+      action: `Reversed stock deduction for cancelled Bill ${originalEvent.billNumber}`,
+      module: 'BILLING_INTEGRATION',
+      referenceId: originalEvent.billNumber,
+      newValue: `Restored ${originalEvent.items.length} item lines. Reason: ${reason}`,
+    });
+
+    return {
+      success: true,
+      message: `Stock successfully reversed for Bill ${originalEvent.billNumber}`,
+      billNumber: originalEvent.billNumber,
+      itemsRestored: originalEvent.items.length,
+    };
+  }
+
+  /**
+   * Physical Stock Adjustment / Reconciliation
+   */
+  static async adjustStock(params: {
+    productId: string;
+    location: 'GODOWN' | 'SHOP';
+    physicalQty: number;
+    reason: string;
+    adjustedBy?: string;
+  }): Promise<{ adjustment: IStockAdjustment; inventory: IInventory; transaction: IStockTransaction }> {
+    const { productId, location, physicalQty, reason, adjustedBy = 'Admin' } = params;
+
+    if (physicalQty < 0) {
+      throw new Error('Physical stock quantity cannot be negative');
+    }
+
+    if (!reason || reason.trim().length === 0) {
+      throw new Error('A valid reason is required for stock adjustment');
+    }
+
+    const product = await Product.findById(productId);
+    if (!product) {
+      throw new Error(`Product not found with ID ${productId}`);
+    }
+
+    const inventory = await Inventory.findOne({ productId });
+    if (!inventory) {
+      throw new Error(`Inventory not found for product ${product.name}`);
+    }
+
+    const systemQty = location === 'GODOWN' ? inventory.godownStock : inventory.shopStock;
+    const adjustmentQty = physicalQty - systemQty; // can be negative (shrinkage) or positive (found stock)
+
+    const beforeGodown = inventory.godownStock;
+    const beforeShop = inventory.shopStock;
+
+    if (location === 'GODOWN') {
+      inventory.godownStock = physicalQty;
+    } else {
+      inventory.shopStock = physicalQty;
+    }
+    inventory.lastMovementAt = new Date();
+    await inventory.save();
+
+    const adjustmentNumber = generateId('ADJ');
+
+    const adjustment = await StockAdjustment.create({
+      adjustmentNumber,
+      productId: product._id,
+      sku: product.sku,
+      productName: product.name,
+      location,
+      systemQty,
+      physicalQty,
+      adjustmentQty,
+      reason,
+      adjustedBy,
+    });
+
+    const transaction = await StockTransaction.create({
+      transactionId: generateId('ST-ADJ'),
+      productId: product._id,
+      sku: product.sku,
+      productName: product.name,
+      type: 'STOCK_ADJUSTMENT',
+      location,
+      quantity: adjustmentQty,
+      unit: product.unit || 'PCS',
+      beforeGodownStock: beforeGodown,
+      afterGodownStock: inventory.godownStock,
+      beforeShopStock: beforeShop,
+      afterShopStock: inventory.shopStock,
+      referenceId: adjustmentNumber,
+      referenceType: 'ADJUSTMENT',
+      notes: `Physical audit adjustment at ${location}. Variance: ${adjustmentQty > 0 ? '+' : ''}${adjustmentQty} PCS. Reason: ${reason}`,
+      performedBy: adjustedBy,
+    });
+
+    await AuditLog.create({
+      user: adjustedBy,
+      action: `Adjusted ${location} stock for ${product.name} from ${systemQty} to ${physicalQty} PCS`,
+      module: 'ADJUSTMENT',
+      referenceId: adjustmentNumber,
+      oldValue: `${location} Qty: ${systemQty}`,
+      newValue: `${location} Qty: ${physicalQty} (Diff: ${adjustmentQty})`,
+    });
+
+    return { adjustment, inventory, transaction };
+  }
+}
