@@ -242,13 +242,22 @@ export const bulkDeleteProducts = async (req: AuthRequest, res: Response): Promi
     const { ids, deleteAll } = req.body;
 
     if (deleteAll) {
+      const { StockTransaction } = require('../models/StockTransaction');
+      const { StockTransfer } = require('../models/StockTransfer');
+      const { StockAdjustment } = require('../models/StockAdjustment');
+      const { IntegrationEvent } = require('../models/IntegrationEvent');
+
       const count = await Product.countDocuments();
       await Product.deleteMany({});
       await Inventory.deleteMany({});
+      await StockTransaction.deleteMany({});
+      await StockTransfer.deleteMany({});
+      await StockAdjustment.deleteMany({});
+      await IntegrationEvent.deleteMany({});
 
       await AuditLog.create({
         user: req.user ? req.user.name : 'Admin',
-        action: `Bulk deleted all products and inventories (${count} items removed)`,
+        action: `Bulk deleted all products, inventories, and transactions (${count} items removed)`,
         module: 'PRODUCT',
         referenceId: `BULK-DEL-ALL-${Date.now()}`,
         ipAddress: req.ip || '',
@@ -256,7 +265,7 @@ export const bulkDeleteProducts = async (req: AuthRequest, res: Response): Promi
 
       res.json({
         success: true,
-        message: `Successfully deleted all ${count} products and inventory records from database.`,
+        message: `Successfully deleted all ${count} products, inventories, and transaction history.`,
         deletedCount: count,
       });
       return;

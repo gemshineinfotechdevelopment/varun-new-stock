@@ -13,6 +13,10 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
       await StockService.syncNewBillsFromDb();
     } catch {}
 
+    // Clean up any orphaned inventories where product no longer exists
+    const existingProductIds = await Product.find({}).distinct('_id');
+    await Inventory.deleteMany({ productId: { $nin: existingProductIds } });
+
     const totalProducts = await Product.countDocuments({ isActive: true });
 
     // Aggregate inventory quantities
@@ -110,6 +114,10 @@ export const getInventoryList = async (req: Request, res: Response): Promise<voi
     try {
       await StockService.syncNewBillsFromDb();
     } catch {}
+
+    // Clean up any orphaned inventories where product no longer exists
+    const existingProductIds = await Product.find({}).distinct('_id');
+    await Inventory.deleteMany({ productId: { $nin: existingProductIds } });
 
     const { category, search, filterLowStock, sortBy = 'totalStock', sortOrder = 'desc' } = req.query;
 
