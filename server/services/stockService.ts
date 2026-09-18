@@ -104,7 +104,7 @@ export class StockService {
           product.mrp = mrp;
           product.discount = discount;
           product.rate = rate;
-          if (typeof product.stock !== 'number') product.stock = rawStock;
+          product.stock = rawStock;
           product.isActive = item.isActive !== false;
           await product.save();
 
@@ -125,13 +125,9 @@ export class StockService {
           } else {
             inv.productName = product.name;
             inv.category = product.category;
-            // If shopStock was 0 and godownStock has stock, migrate to shopStock so sales deduct visibly
-            if (inv.shopStock === 0 && inv.godownStock > 0) {
-              inv.shopStock = inv.godownStock;
-              inv.godownStock = 0;
-            } else if (inv.shopStock === 0 && inv.godownStock === 0 && rawStock > 0) {
-              inv.shopStock = rawStock;
-            }
+            // Update shopStock to match billing particulars stock directly
+            inv.shopStock = rawStock;
+            inv.lastMovementAt = new Date();
             await inv.save();
           }
           updatedCount++;

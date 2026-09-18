@@ -30,14 +30,16 @@ const PORT = process.env.PORT || 5013;
 // Connect Database & Seed default data
 connectDB().then(() => {
   seedDatabase().then(() => {
-    // Initial sync of bills
+    // Initial sync of particulars & bills from shared DB
+    StockService.syncFromBillingParticulars().catch(() => {});
     StockService.syncNewBillsFromDb().catch(() => {});
   });
 
-  // Background auto-sync of new bills every 10 seconds from shared DB
+  // Background auto-sync of particulars & new bills every 5 seconds from shared DB
   setInterval(() => {
+    StockService.syncFromBillingParticulars().catch(() => {});
     StockService.syncNewBillsFromDb().catch(() => {});
-  }, 10000);
+  }, 5000);
 });
 
 // Configure CORS Origins
