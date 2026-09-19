@@ -124,9 +124,7 @@ export class StockService {
           product.mrp = mrp;
           product.discount = discount;
           product.rate = rate;
-          product.stock = rawStock;
           product.isActive = item.isActive !== false;
-          await product.save();
 
           let inv = await Inventory.findOne({ productId: product._id });
           if (!inv) {
@@ -141,13 +139,16 @@ export class StockService {
               minShopStock: product.minShopStock || 5,
               lastMovementAt: new Date(),
             });
+            product.stock = rawStock;
           } else {
             inv.productName = product.name;
             inv.category = product.category;
-            inv.shopStock = rawStock;
             inv.lastMovementAt = new Date();
             await inv.save();
+            // Preserve live godown and shop stock balances!
+            product.stock = (Number(inv.godownStock) || 0) + (Number(inv.shopStock) || 0);
           }
+          await product.save();
           updatedCount++;
         } else {
           const productData: any = {
@@ -217,9 +218,22 @@ export class StockService {
       const collections = await mongoose.connection.db.listCollections().toArray();
       const colNames = collections.map((c) => c.name);
 
-      // Target collections for bills: 'particulars' (Billing bill collection), 'bills', 'invoices', 'sales', 'orders'
+      // Target collections for bills: 'particulars' (Billing bill collection), 'bills', 'invoices', 'sales', 'orders', etc.
       const targetCols = colNames.filter((n) =>
-        ['particulars', 'bills', 'bill', 'invoices', 'invoice', 'sales', 'sale', 'orders', 'order', 'customertransactions', 'estimates', 'billings'].includes(n.toLowerCase())
+        [
+          'particulars',
+          'bills',
+          'bill',
+          'invoices',
+          'invoice',
+          'sales',
+          'sale',
+          'orders',
+          'order',
+          'customertransactions',
+          'estimates',
+          'billings',
+        ].includes(n.toLowerCase())
       );
 
       if (targetCols.length === 0) {
@@ -232,23 +246,114 @@ export class StockService {
 
       for (const colName of targetCols) {
         const billsCol = mongoose.connection.db.collection(colName);
-        const allBills = await billsCol.find({}).sort({ createdAt: -1, billDate: -1, date: -1, _id: -1 }).toArray();
+        const docs = await billsCol.find({}).sort({ createdAt: -1, billDate: -1, date: -1, _id: -1 }).toArray();
 
-        for (const bill of allBills) {
-          const billId = String(bill._id || bill.id || '').trim();
-          const billNumber = String(bill.billNo || bill.billNumber || bill.invoiceNo || bill.invNo || bill.bill_no || (bill.slNo ? `BILL-${bill.slNo}` : billId)).trim();
+        // Group documents that might be flat bill items or bills with items array
+        const billsMap = new Map<string, {
+          billId: string;
+          billNumber: string;
+          customerId: string;
+          billDate: any;
+          items: Array<{
+            productId?: string;
+            sku?: string;
+            productName?: string;
+            quantity: number;
+            slNo?: number;
+          }>;
+        }>();
 
-          if (!billId || !billNumber) continue;
+        for (const doc of docs) {
+          const billId = String(doc._id || doc.id || '').trim();
+          const rawBillNo = doc.billNo ?? doc.billNumber ?? doc.invoiceNo ?? doc.invNo ?? doc.bill_no ?? doc.invoice_no ?? (doc.slNo && (doc.customerName || doc.customer) ? `BILL-${doc.slNo}` : '');
+          const billNumber = String(rawBillNo || billId).trim();
 
-          // Extract items / products array from bill
-          const rawItems = bill.products || bill.items || bill.particulars || bill.lines || bill.rows || bill.cart || [];
-          if (!Array.isArray(rawItems) || rawItems.length === 0) {
-            continue;
+          if (!billNumber) continue;
+
+          // Check if document has array of items
+          const rawItems = doc.products || doc.items || doc.particulars || doc.lines || doc.rows || doc.cart || doc.particularList || doc.itemList;
+
+          if (Array.isArray(rawItems) && rawItems.length > 0) {
+            if (!billsMap.has(billNumber)) {
+              billsMap.set(billNumber, {
+                billId,
+                billNumber,
+                customerId: String(doc.customerName || doc.customerId?.name || doc.customerId || doc.customer || doc.buyerName || 'Counter Sale').trim(),
+                billDate: doc.billDate || doc.date || doc.createdAt || new Date(),
+                items: [],
+              });
+            }
+
+            const billEntry = billsMap.get(billNumber)!;
+            for (const it of rawItems) {
+              const pName = String(
+                it.particular ||
+                it.particularName ||
+                it.productName ||
+                it.name ||
+                it.itemName ||
+                it.item_name ||
+                it.desc ||
+                it.description ||
+                it.particular?.name ||
+                (typeof it.particular === 'string' ? it.particular : '') ||
+                ''
+              ).trim();
+              const pQty = Number(it.quantity ?? it.qty ?? it.count ?? it.pcs ?? it.box ?? it.units ?? it.noOfUnits ?? it.billedQty ?? it.netQty ?? 0) || 0;
+              const pId = it.productId || it.particularId || it.particular?._id || it._id || it.id;
+              const pSku = it.sku || it.itemCode || it.code || it.particularCode;
+              const pSlNo = Number(it.slNo || it.sno || it.sNo || 0) || undefined;
+
+              if (pQty > 0 && (pName || pSku || pId)) {
+                billEntry.items.push({
+                  productId: pId ? String(pId) : undefined,
+                  sku: pSku ? String(pSku) : undefined,
+                  productName: pName,
+                  quantity: pQty,
+                  slNo: pSlNo,
+                });
+              }
+            }
+          } else if (rawBillNo && (doc.particular || doc.particularName || doc.itemName || doc.productName || doc.name)) {
+            // Flat document row (e.g. particulars collection where each document represents one billed line)
+            const pName = String(doc.particular || doc.particularName || doc.itemName || doc.productName || doc.name || '').trim();
+            const pQty = Number(doc.quantity ?? doc.qty ?? doc.count ?? doc.pcs ?? doc.box ?? doc.units ?? doc.noOfUnits ?? doc.billedQty ?? 0) || 0;
+            const pId = doc.productId || doc.particularId || doc.id;
+            const pSku = doc.sku || doc.itemCode || doc.code;
+            const pSlNo = Number(doc.slNo || doc.sno || doc.sNo || 0) || undefined;
+
+            if (pQty > 0 && pName) {
+              if (!billsMap.has(billNumber)) {
+                billsMap.set(billNumber, {
+                  billId,
+                  billNumber,
+                  customerId: String(doc.customerName || doc.customer || doc.buyerName || 'Counter Sale').trim(),
+                  billDate: doc.billDate || doc.date || doc.createdAt || new Date(),
+                  items: [],
+                });
+              }
+              billsMap.get(billNumber)!.items.push({
+                productId: pId ? String(pId) : undefined,
+                sku: pSku ? String(pSku) : undefined,
+                productName: pName,
+                quantity: pQty,
+                slNo: pSlNo,
+              });
+            }
           }
+        }
+
+        // Process all detected bills
+        for (const [, bill] of billsMap) {
+          if (bill.items.length === 0) continue;
 
           // Check if already processed
           const existing = await IntegrationEvent.findOne({
-            $or: [{ externalBillId: billId }, { billNumber }],
+            $or: [
+              { externalBillId: bill.billId },
+              { billNumber: bill.billNumber },
+              { billNumber: new RegExp(`^${bill.billNumber.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+            ],
             eventType: 'BILL_SALE',
             status: 'PROCESSED',
           });
@@ -258,48 +363,21 @@ export class StockService {
             continue;
           }
 
-          const normalizedItems = rawItems
-            .map((it: any) => {
-              const pName = String(
-                it.particular ||
-                it.particularName ||
-                it.productName ||
-                it.name ||
-                it.itemName ||
-                it.particular?.name ||
-                (typeof it.particular === 'string' ? it.particular : '') ||
-                ''
-              ).trim();
-              const pQty = Number(it.quantity ?? it.qty ?? it.count ?? it.pcs ?? it.box ?? it.units ?? it.noOfUnits ?? 0) || 0;
-              const pId = it.productId || it.particularId || it.particular?._id || it._id || it.id;
-              const pSku = it.sku || it.itemCode || it.code || it.particularCode;
-
-              return {
-                productId: pId ? String(pId) : undefined,
-                sku: pSku ? String(pSku) : undefined,
-                productName: pName,
-                quantity: pQty,
-              };
-            })
-            .filter((it: any) => it.quantity > 0 && (it.productName || it.sku || it.productId));
-
-          if (normalizedItems.length === 0) continue;
-
           try {
             const res = await this.processBillingSale({
-              billId,
-              billNumber,
-              customerId: bill.customerName || bill.customerId?.name || bill.customerId || bill.customer || 'Counter Sale',
-              items: normalizedItems,
-              billDate: bill.billDate || bill.date || bill.createdAt || new Date(),
+              billId: bill.billId,
+              billNumber: bill.billNumber,
+              customerId: bill.customerId,
+              items: bill.items,
+              billDate: bill.billDate,
             });
 
             if (res.success) {
               processedBills++;
             }
           } catch (err: any) {
-            console.warn(`[Auto Bill Sync] Error processing bill ${billNumber} from '${colName}':`, err.message);
-            errors.push(`Bill ${billNumber} (${colName}): ${err.message}`);
+            console.warn(`[Auto Bill Sync] Error processing bill ${bill.billNumber} from '${colName}':`, err.message);
+            errors.push(`Bill ${bill.billNumber} (${colName}): ${err.message}`);
           }
         }
       }
@@ -612,7 +690,7 @@ export class StockService {
         continue;
       }
 
-      // Find product by SKU or productId or name (case-insensitive)
+      // Find product by SKU or productId, slNo, or name (case-insensitive & whitespace-resilient)
       let product: IProduct | null = null;
       if (item.productId && mongoose.Types.ObjectId.isValid(item.productId)) {
         product = await Product.findById(item.productId);
@@ -620,14 +698,30 @@ export class StockService {
       if (!product && item.sku) {
         product = await Product.findOne({ sku: item.sku.trim().toUpperCase() });
       }
+      if (!product && (item as any).slNo) {
+        product = await Product.findOne({ slNo: Number((item as any).slNo) });
+      }
       if (!product && item.productName) {
         const pName = item.productName.trim();
+        const escaped = pName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         product = await Product.findOne({
           $or: [
             { name: pName },
-            { name: new RegExp(`^${pName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+            { name: new RegExp(`^${escaped}$`, 'i') },
+            { name: new RegExp(`^\\s*${escaped}\\s*$`, 'i') },
           ],
         });
+
+        // If still not found, try flexible space/punctuation regex match
+        if (!product) {
+          try {
+            const cleanPattern = pName
+              .split(/\s+/)
+              .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+              .join('.*');
+            product = await Product.findOne({ name: new RegExp(cleanPattern, 'i') });
+          } catch {}
+        }
       }
 
       if (!product) {
